@@ -37,13 +37,15 @@ defmodule ExMonty.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib native .formatter.exs mix.exs README.md LICENSE)
+      files:
+        ~w(lib native/ex_monty/Cargo.toml native/ex_monty/Cargo.lock native/ex_monty/src .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
     ]
   end
 
   defp docs do
     [
-      main: "ExMonty",
+      main: "readme",
+      extras: ["README.md", "CHANGELOG.md"],
       source_url: @source_url,
       source_ref: "v#{@version}"
     ]

@@ -24,7 +24,6 @@ ex_monty-*.tar
 
 # Rust build artifacts
 /native/ex_monty/target/
-/native/ex_monty/Cargo.lock
 
 # Compiled NIF shared library
 /priv/native/
