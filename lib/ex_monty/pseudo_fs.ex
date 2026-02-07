@@ -389,18 +389,18 @@ defmodule ExMonty.PseudoFS do
   end
 
   defp stat_result(mode, size, mtime) do
-    {:stat_result,
-     %{
-       st_mode: mode,
-       st_ino: 0,
-       st_dev: 0,
-       st_nlink: if(Bitwise.band(mode, 0o040_000) != 0, do: 2, else: 1),
-       st_uid: 0,
-       st_gid: 0,
-       st_size: size,
-       st_atime: mtime,
-       st_mtime: mtime,
-       st_ctime: mtime
-     }}
+    {:named_tuple, "StatResult",
+     [
+       {"st_mode", mode},
+       {"st_ino", 0},
+       {"st_dev", 0},
+       {"st_nlink", if(Bitwise.band(mode, 0o040_000) != 0, do: 2, else: 1)},
+       {"st_uid", 0},
+       {"st_gid", 0},
+       {"st_size", size},
+       {"st_atime", mtime},
+       {"st_mtime", mtime},
+       {"st_ctime", mtime}
+     ]}
   end
 end

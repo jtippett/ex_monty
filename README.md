@@ -25,7 +25,7 @@ def deps do
 end
 ```
 
-Requires Rust >= 1.85 (for the monty crate's edition 2024).
+Requires Rust >= 1.90. Building also requires network access (the Monty Rust crate is a git dependency).
 
 ## Quick Start
 
@@ -284,8 +284,8 @@ Runners and snapshots can be serialized to binary for storage or transfer:
 | `set` / `frozenset` | `MapSet`                        |                                        |
 | `...` (Ellipsis)    | `:ellipsis`                     |                                        |
 | `Path`              | `{:path, string}`               |                                        |
-| `NamedTuple`        | `{atom, %{fields}}`             | Type name as snake_case atom           |
-| `@dataclass`        | `%ExMonty.Dataclass{}`          |                                        |
+| `NamedTuple`        | `{:named_tuple, type_name, fields}` | `type_name` is a string; `fields` is an ordered list of `{field_name, value}` pairs |
+| `@dataclass`        | `%ExMonty.Dataclass{}`          | `fields` keys are strings              |
 | Exception           | `%ExMonty.Exception{}`          | With type, message, traceback          |
 
 ### Input Direction (Elixir to Python)

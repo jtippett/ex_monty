@@ -16,7 +16,7 @@ fn start<'a>(
     limits: Term<'a>,
 ) -> NifResult<Term<'a>> {
     let monty_run = runner.clone_runner();
-    let monty_inputs = types::decode_inputs(env, inputs)?;
+    let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
     let resource_limits = types::decode_resource_limits(limits)?;
     let tracker = LimitedTracker::new(resource_limits);
     let mut print = CollectStringPrint::new();
@@ -107,12 +107,7 @@ fn encode_run_progress<'a>(
             let snapshot_ref = ResourceArc::new(SnapshotResource::new(state));
             Ok(rustler::types::tuple::make_tuple(
                 env,
-                &[
-                    tag.encode(env),
-                    call,
-                    snapshot_ref.encode(env),
-                    output_term,
-                ],
+                &[tag.encode(env), call, snapshot_ref.encode(env), output_term],
             ))
         }
         RunProgress::OsCall {
@@ -127,12 +122,7 @@ fn encode_run_progress<'a>(
             let snapshot_ref = ResourceArc::new(SnapshotResource::new(state));
             Ok(rustler::types::tuple::make_tuple(
                 env,
-                &[
-                    tag.encode(env),
-                    call,
-                    snapshot_ref.encode(env),
-                    output_term,
-                ],
+                &[tag.encode(env), call, snapshot_ref.encode(env), output_term],
             ))
         }
         RunProgress::ResolveFutures(future_snapshot) => {
@@ -161,10 +151,12 @@ fn encode_function_call<'a>(
     kwargs: &[(MontyObject, MontyObject)],
     call_id: u32,
 ) -> Term<'a> {
-    let struct_atom =
-        Atom::from_str(env, "Elixir.ExMonty.FunctionCall").unwrap();
+    let struct_atom = Atom::from_str(env, "Elixir.ExMonty.FunctionCall").unwrap();
 
-    let args_term: Vec<Term> = args.iter().map(|a| types::encode_monty_object(env, a)).collect();
+    let args_term: Vec<Term> = args
+        .iter()
+        .map(|a| types::encode_monty_object(env, a))
+        .collect();
     let kwargs_term = encode_kwargs(env, kwargs);
 
     rustler::types::map::map_new(env)
@@ -205,7 +197,10 @@ fn encode_os_call<'a>(
     let struct_atom = Atom::from_str(env, "Elixir.ExMonty.OsCall").unwrap();
 
     let func_term = types::encode_os_function(env, function);
-    let args_term: Vec<Term> = args.iter().map(|a| types::encode_monty_object(env, a)).collect();
+    let args_term: Vec<Term> = args
+        .iter()
+        .map(|a| types::encode_monty_object(env, a))
+        .collect();
     let kwargs_term = encode_kwargs(env, kwargs);
 
     rustler::types::map::map_new(env)
@@ -275,8 +270,7 @@ fn decode_external_result<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<Externa
                             let msg: String = elements[1]
                                 .decode()
                                 .unwrap_or_else(|_| "unknown error".to_string());
-                            let exc =
-                                MontyException::new(monty::ExcType::RuntimeError, Some(msg));
+                            let exc = MontyException::new(monty::ExcType::RuntimeError, Some(msg));
                             return Ok(ExternalResult::Error(exc));
                         }
                     }

@@ -48,6 +48,7 @@ defmodule ExMonty do
   @type runner :: reference()
   @type snapshot :: reference()
   @type future_snapshot :: reference()
+  @type error_reason :: term()
 
   @type limits :: %{
           optional(:max_allocations) => non_neg_integer(),
@@ -83,16 +84,22 @@ defmodule ExMonty do
         external_functions: ["fetch"]
       )
   """
-  @spec compile(String.t(), keyword()) :: {:ok, runner()} | {:error, ExMonty.Exception.t()}
+  @spec compile(String.t(), keyword()) :: {:ok, runner()} | {:error, error_reason()}
   def compile(code, opts \\ []) do
-    inputs = Keyword.get(opts, :inputs, [])
-    external_fns = Keyword.get(opts, :external_functions, [])
-    script_name = Keyword.get(opts, :script_name, "main.py")
+    inputs = opts |> Keyword.get(:inputs, []) |> Enum.map(&to_string/1)
+    external_fns = opts |> Keyword.get(:external_functions, []) |> Enum.map(&to_string/1)
+    script_name = opts |> Keyword.get(:script_name, "main.py") |> to_string()
 
-    case Native.compile(code, script_name, inputs, external_fns) do
-      {:ok, runner} -> {:ok, runner}
-      {:error, reason} -> {:error, reason}
-      runner when is_reference(runner) -> {:ok, runner}
+    with :ok <- validate_name_list("inputs", inputs),
+         :ok <- validate_name_list("external_functions", external_fns) do
+      inputs = Enum.sort(inputs)
+      external_fns = Enum.sort(external_fns)
+
+      case Native.compile(code, script_name, inputs, external_fns) do
+        {:ok, runner} -> {:ok, runner}
+        {:error, reason} -> {:error, reason}
+        runner when is_reference(runner) -> {:ok, runner}
+      end
     end
   end
 
@@ -112,15 +119,15 @@ defmodule ExMonty do
       # result = 3, output = ""
   """
   @spec run(runner(), map(), keyword()) ::
-          {:ok, term(), String.t()} | {:error, ExMonty.Exception.t()}
+          {:ok, term(), String.t()} | {:error, error_reason()}
   def run(runner, inputs \\ %{}, opts \\ []) do
     limits = Keyword.get(opts, :limits, nil)
     input_list = Enum.map(inputs, fn {k, v} -> {to_string(k), v} end)
 
     case Native.run(runner, input_list, limits) do
+      {:error, reason} -> {:error, reason}
       {:ok, {result, output}} -> {:ok, result, output}
       {result, output} when is_binary(output) -> {:ok, result, output}
-      {:error, reason} -> {:error, reason}
     end
   rescue
     e in ErlangError ->
@@ -146,10 +153,10 @@ defmodule ExMonty do
         inputs: %{"x" => 10, "y" => 20}
       )
   """
-  @spec eval(String.t(), keyword()) :: {:ok, term(), String.t()} | {:error, ExMonty.Exception.t()}
+  @spec eval(String.t(), keyword()) :: {:ok, term(), String.t()} | {:error, error_reason()}
   def eval(code, opts \\ []) do
     inputs = Keyword.get(opts, :inputs, %{})
-    input_names = inputs |> Map.keys() |> Enum.map(&to_string/1)
+    input_names = inputs |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
     limits = Keyword.get(opts, :limits, nil)
     script_name = Keyword.get(opts, :script_name, "main.py")
 
@@ -194,15 +201,15 @@ defmodule ExMonty do
       call.name  # "fetch"
       call.args  # ["https://example.com"]
   """
-  @spec start(runner(), map(), keyword()) :: {:ok, progress()} | {:error, ExMonty.Exception.t()}
+  @spec start(runner(), map(), keyword()) :: {:ok, progress()} | {:error, error_reason()}
   def start(runner, inputs \\ %{}, opts \\ []) do
     limits = Keyword.get(opts, :limits, nil)
     input_list = Enum.map(inputs, fn {k, v} -> {to_string(k), v} end)
 
     case Native.start(runner, input_list, limits) do
+      {:error, reason} -> {:error, reason}
       {:ok, progress} -> {:ok, progress}
       progress when is_tuple(progress) -> {:ok, progress}
-      {:error, reason} -> {:error, reason}
     end
   rescue
     e in ErlangError ->
@@ -221,12 +228,12 @@ defmodule ExMonty do
       {:ok, next_progress} = ExMonty.resume(snapshot, {:error, :runtime_error, "fetch failed"})
   """
   @spec resume(snapshot(), {:ok, term()} | {:error, atom(), String.t()}) ::
-          {:ok, progress()} | {:error, ExMonty.Exception.t()}
+          {:ok, progress()} | {:error, error_reason()}
   def resume(snapshot, result) do
     case Native.resume(snapshot, result) do
+      {:error, reason} -> {:error, reason}
       {:ok, progress} -> {:ok, progress}
       progress when is_tuple(progress) -> {:ok, progress}
-      {:error, reason} -> {:error, reason}
     end
   rescue
     e in ErlangError ->
@@ -245,12 +252,12 @@ defmodule ExMonty do
       {:ok, next_progress} = ExMonty.resume_futures(futures, results)
   """
   @spec resume_futures(future_snapshot(), [{non_neg_integer(), term()}]) ::
-          {:ok, progress()} | {:error, ExMonty.Exception.t()}
+          {:ok, progress()} | {:error, error_reason()}
   def resume_futures(futures, results) do
     case Native.resume_futures(futures, results) do
+      {:error, reason} -> {:error, reason}
       {:ok, progress} -> {:ok, progress}
       progress when is_tuple(progress) -> {:ok, progress}
-      {:error, reason} -> {:error, reason}
     end
   rescue
     e in ErlangError ->
@@ -348,5 +355,28 @@ defmodule ExMonty do
   rescue
     e in ErlangError ->
       {:error, e.original}
+  end
+
+  defp validate_name_list(_label, []), do: :ok
+
+  defp validate_name_list(label, names) when is_list(names) do
+    cond do
+      Enum.any?(names, &(&1 == "")) ->
+        {:error, "#{label} must not contain empty strings"}
+
+      true ->
+        duplicates =
+          names
+          |> Enum.frequencies()
+          |> Enum.filter(fn {_name, count} -> count > 1 end)
+          |> Enum.map(fn {name, _} -> name end)
+          |> Enum.sort()
+
+        if duplicates == [] do
+          :ok
+        else
+          {:error, "duplicate #{label}: #{Enum.join(duplicates, ", ")}"}
+        end
+    end
   end
 end

@@ -5,7 +5,7 @@ defmodule ExMonty.Dataclass do
   ## Fields
 
     * `:name` - the dataclass type name
-    * `:fields` - map of field name atoms to values
+    * `:fields` - map of field name strings to values
     * `:frozen` - whether the dataclass is frozen (immutable)
   """
 

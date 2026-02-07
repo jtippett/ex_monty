@@ -6,11 +6,15 @@ use std::sync::Mutex;
 /// MontyRun is Clone, so we can share it safely.
 pub struct RunnerResource {
     runner: MontyRun,
+    input_names: Vec<String>,
 }
 
 impl RunnerResource {
-    pub fn new(runner: MontyRun) -> Self {
-        Self { runner }
+    pub fn new(runner: MontyRun, input_names: Vec<String>) -> Self {
+        Self {
+            runner,
+            input_names,
+        }
     }
 
     pub fn runner(&self) -> &MontyRun {
@@ -19,6 +23,10 @@ impl RunnerResource {
 
     pub fn clone_runner(&self) -> MontyRun {
         self.runner.clone()
+    }
+
+    pub fn input_names(&self) -> &[String] {
+        &self.input_names
     }
 }
 

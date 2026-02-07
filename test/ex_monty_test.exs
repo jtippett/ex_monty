@@ -75,6 +75,23 @@ defmodule ExMontyTest do
       assert {:ok, 10, ""} = ExMonty.run(runner, %{"x" => 5})
     end
 
+    test "inputs are mapped by name (order independent)" do
+      {:ok, runner} = ExMonty.compile("x - y", inputs: ["x", "y"])
+
+      # Direct NIF call with intentionally reversed input order.
+      assert {-10, ""} = ExMonty.Native.run(runner, [{"y", 20}, {"x", 10}], nil)
+
+      # High-level API should also work regardless of map enumeration order.
+      assert {:ok, -10, ""} = ExMonty.run(runner, %{"x" => 10, "y" => 20})
+    end
+
+    test "missing and unexpected inputs return errors" do
+      {:ok, runner} = ExMonty.compile("x + y", inputs: ["x", "y"])
+
+      assert {:error, _} = ExMonty.run(runner, %{"x" => 1})
+      assert {:error, _} = ExMonty.run(runner, %{"x" => 1, "y" => 2, "z" => 3})
+    end
+
     test "runner is reusable" do
       {:ok, runner} = ExMonty.compile("x + 1", inputs: ["x"])
       assert {:ok, 2, ""} = ExMonty.run(runner, %{"x" => 1})
@@ -98,6 +115,16 @@ defmodule ExMontyTest do
   describe "type mapping" do
     test "integer" do
       assert {:ok, 42, ""} = ExMonty.eval("42")
+    end
+
+    test "big integer input/output" do
+      big = Integer.pow(2, 100)
+
+      assert {:ok, ^big, ""} = ExMonty.eval("2 ** 100")
+
+      {:ok, runner} = ExMonty.compile("x + 1", inputs: ["x"])
+      expected = big + 1
+      assert {:ok, ^expected, ""} = ExMonty.run(runner, %{"x" => big})
     end
 
     test "negative integer" do
@@ -166,7 +193,9 @@ defmodule ExMontyTest do
 
     test "bytes input roundtrip" do
       {:ok, runner} = ExMonty.compile("x", inputs: ["x"])
-      assert {:ok, {:bytes, <<1, 2, 3>>}, ""} = ExMonty.run(runner, %{"x" => {:bytes, <<1, 2, 3>>}})
+
+      assert {:ok, {:bytes, <<1, 2, 3>>}, ""} =
+               ExMonty.run(runner, %{"x" => {:bytes, <<1, 2, 3>>}})
     end
 
     test "path input roundtrip" do

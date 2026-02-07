@@ -1,10 +1,10 @@
 use monty::{MontyObject, OsFunction, ResourceLimits};
 use num_bigint::BigInt;
-use num_traits::ToPrimitive;
 use rustler::types::atom::Atom;
 use rustler::types::map::MapIterator;
 use rustler::types::tuple::get_tuple;
 use rustler::{Encoder, Env, NifResult, Term};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 // ── Encoding: MontyObject → Erlang Term ──────────────────────────────────────
@@ -14,7 +14,7 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
         MontyObject::None => rustler::types::atom::nil().encode(env),
         MontyObject::Bool(b) => b.encode(env),
         MontyObject::Int(i) => i.encode(env),
-        MontyObject::BigInt(bi) => encode_bigint(env, bi),
+        MontyObject::BigInt(bi) => bi.encode(env),
         MontyObject::Float(f) => f.encode(env),
         MontyObject::String(s) => s.encode(env),
         MontyObject::Bytes(b) => {
@@ -55,14 +55,22 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
             field_names,
             values,
         } => {
-            let name_atom = Atom::from_str(env, &snake_case(type_name)).unwrap();
-            let mut fields_map = rustler::types::map::map_new(env);
-            for (fname, val) in field_names.iter().zip(values.iter()) {
-                let key = Atom::from_str(env, fname).unwrap().encode(env);
-                let value = encode_monty_object(env, val);
-                fields_map = fields_map.map_put(key, value).unwrap();
-            }
-            rustler::types::tuple::make_tuple(env, &[name_atom.encode(env), fields_map])
+            let tag = Atom::from_str(env, "named_tuple").unwrap();
+
+            let fields: Vec<Term> = field_names
+                .iter()
+                .zip(values.iter())
+                .map(|(fname, val)| {
+                    let key = fname.encode(env);
+                    let value = encode_monty_object(env, val);
+                    rustler::types::tuple::make_tuple(env, &[key, value])
+                })
+                .collect();
+
+            rustler::types::tuple::make_tuple(
+                env,
+                &[tag.encode(env), type_name.encode(env), fields.encode(env)],
+            )
         }
         MontyObject::Dataclass {
             name,
@@ -85,7 +93,7 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
                 .collect();
             for fname in field_names {
                 if let Some(val) = attr_map.get(fname) {
-                    let key = Atom::from_str(env, fname).unwrap().encode(env);
+                    let key = fname.encode(env);
                     let value = encode_monty_object(env, val);
                     fields_map = fields_map.map_put(key, value).unwrap();
                 }
@@ -131,10 +139,7 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
                     type_atom.encode(env),
                 )
                 .unwrap()
-                .map_put(
-                    Atom::from_str(env, "message").unwrap().encode(env),
-                    message,
-                )
+                .map_put(Atom::from_str(env, "message").unwrap().encode(env), message)
                 .unwrap()
                 .map_put(
                     Atom::from_str(env, "traceback").unwrap().encode(env),
@@ -142,8 +147,8 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
                 )
                 .unwrap()
         }
-        MontyObject::Type(_ty) => {
-            let repr = obj.to_string();
+        MontyObject::Type(ty) => {
+            let repr = ty.to_string();
             Atom::from_str(env, &snake_case(&repr))
                 .unwrap_or_else(|_| Atom::from_str(env, "unknown_type").unwrap())
                 .encode(env)
@@ -176,41 +181,14 @@ fn encode_mapset<'a>(env: Env<'a>, members: &[Term<'a>]) -> Term<'a> {
             struct_atom.encode(env),
         )
         .unwrap()
-        .map_put(
-            Atom::from_str(env, "map").unwrap().encode(env),
-            inner_map,
-        )
+        .map_put(Atom::from_str(env, "map").unwrap().encode(env), inner_map)
         .unwrap()
 }
 
-fn encode_bigint<'a>(env: Env<'a>, bi: &BigInt) -> Term<'a> {
-    // Try to fit in i64 first
-    if let Some(i) = bi.to_i64() {
-        return i.encode(env);
-    }
-    // For larger values, convert through byte representation.
-    // Erlang/BEAM natively supports big integers, so we convert via
-    // the string representation and use Elixir's String.to_integer equivalent.
-    // Since we can't call erlang:binary_to_integer from Rust NIF directly,
-    // we'll use the two's complement byte representation.
-    let (sign, bytes) = bi.to_bytes_be();
-    let sign_int: i32 = match sign {
-        num_bigint::Sign::Minus => -1,
-        num_bigint::Sign::NoSign => 0,
-        num_bigint::Sign::Plus => 1,
-    };
-
-    // Encode as {:__bigint__, sign, bytes} and let Elixir handle reconstruction
-    let tag = Atom::from_str(env, "__bigint__").unwrap();
-    let mut owned = rustler::OwnedBinary::new(bytes.len()).unwrap();
-    owned.as_mut_slice().copy_from_slice(&bytes);
-    let binary = owned.release(env);
-
-    rustler::types::tuple::make_tuple(
-        env,
-        &[tag.encode(env), sign_int.encode(env), binary.encode(env)],
-    )
-}
+const STAT_RESULT_FIELD_ORDER: [&str; 10] = [
+    "st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime",
+    "st_mtime", "st_ctime",
+];
 
 // ── Decoding: Erlang Term → MontyObject ──────────────────────────────────────
 
@@ -223,13 +201,18 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
             "true" => Ok(MontyObject::Bool(true)),
             "false" => Ok(MontyObject::Bool(false)),
             "ellipsis" => Ok(MontyObject::Ellipsis),
-            _ => Err(rustler::Error::BadArg),
+            other => Ok(MontyObject::String(other.to_owned())),
         };
     }
 
     // Try i64 first (most common integer case)
     if let Ok(i) = term.decode::<i64>() {
         return Ok(MontyObject::Int(i));
+    }
+
+    // Big integer (arbitrary precision)
+    if let Ok(bi) = term.decode::<BigInt>() {
+        return Ok(MontyObject::BigInt(bi));
     }
 
     // Float
@@ -240,12 +223,25 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
 
     // Binary/String
     if term.is_binary() {
-        let s: String = term.decode()?;
-        return Ok(MontyObject::String(s));
+        if let Ok(s) = term.decode::<String>() {
+            return Ok(MontyObject::String(s));
+        }
+
+        let binary: rustler::Binary = term.decode()?;
+        return Ok(MontyObject::Bytes(binary.as_slice().to_vec()));
     }
 
     // Tuple - check for tagged tuples first
     if let Ok(elements) = get_tuple(term) {
+        // Tagged NamedTuple: {:named_tuple, type_name, fields}
+        if elements.len() == 3 {
+            if let Ok(tag) = elements[0].atom_to_string() {
+                if tag == "named_tuple" {
+                    return decode_named_tuple(env, elements[1], elements[2]);
+                }
+            }
+        }
+
         if elements.len() == 2 {
             if let Ok(tag) = elements[0].atom_to_string() {
                 match tag.as_str() {
@@ -281,37 +277,6 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                 }
             }
         }
-        // Check for NamedTuple format: {atom, %{field_atom => value}}
-        if elements.len() == 2 {
-            if let Ok(type_name) = elements[0].atom_to_string() {
-                if elements[1].is_map() {
-                    if let Some(iter) = MapIterator::new(elements[1]) {
-                        let mut field_names = Vec::new();
-                        let mut values = Vec::new();
-                        let mut all_atom_keys = true;
-                        for (k, v) in iter {
-                            if let Ok(key_name) = k.atom_to_string() {
-                                field_names.push(key_name);
-                                match decode_monty_object(env, v) {
-                                    Ok(val) => values.push(val),
-                                    Err(_) => { all_atom_keys = false; break; }
-                                }
-                            } else {
-                                all_atom_keys = false;
-                                break;
-                            }
-                        }
-                        if all_atom_keys && !field_names.is_empty() {
-                            return Ok(MontyObject::NamedTuple {
-                                type_name: pascal_case(&type_name),
-                                field_names,
-                                values,
-                            });
-                        }
-                    }
-                }
-            }
-        }
         // Regular tuple
         let items: Vec<MontyObject> = elements
             .iter()
@@ -338,8 +303,7 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                 if struct_name == "Elixir.MapSet" {
                     let map_key = Atom::from_str(env, "map").unwrap().encode(env);
                     let inner_map = term.map_get(map_key).map_err(|_| rustler::Error::BadArg)?;
-                    let iter =
-                        MapIterator::new(inner_map).ok_or(rustler::Error::BadArg)?;
+                    let iter = MapIterator::new(inner_map).ok_or(rustler::Error::BadArg)?;
                     let items: Vec<MontyObject> = iter
                         .map(|(k, _v)| decode_monty_object(env, k))
                         .collect::<NifResult<Vec<_>>>()?;
@@ -359,11 +323,6 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
         return Ok(MontyObject::dict(pairs));
     }
 
-    // If we got here and the term is a number but didn't decode as i64,
-    // it could be a big integer. Try to handle via is_number check.
-    // Unfortunately Rustler doesn't provide a direct bigint decode,
-    // so big integers that don't fit i64 need to go through Elixir-side conversion.
-    // For now, return an error for unsupported types.
     Err(rustler::Error::BadArg)
 }
 
@@ -372,11 +331,68 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
 pub fn decode_inputs<'a>(
     env: Env<'a>,
     inputs: Vec<(String, Term<'a>)>,
+    expected_input_names: &[String],
 ) -> NifResult<Vec<MontyObject>> {
-    inputs
-        .into_iter()
-        .map(|(_name, term)| decode_monty_object(env, term))
-        .collect()
+    if expected_input_names.is_empty() {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        return Err(rustler::Error::Term(Box::new(format!(
+            "unexpected inputs: expected none, got {}",
+            inputs.len()
+        ))));
+    }
+
+    let mut expected_set: HashSet<&str> = HashSet::with_capacity(expected_input_names.len());
+    for name in expected_input_names {
+        if !expected_set.insert(name.as_str()) {
+            return Err(rustler::Error::Term(Box::new(format!(
+                "runner has duplicate input name: {name}"
+            ))));
+        }
+    }
+
+    let mut provided: HashMap<String, MontyObject> = HashMap::with_capacity(inputs.len());
+    for (name, term) in inputs {
+        if provided.contains_key(&name) {
+            return Err(rustler::Error::Term(Box::new(format!(
+                "duplicate input provided: {name}"
+            ))));
+        }
+
+        let value = decode_monty_object(env, term)?;
+        provided.insert(name, value);
+    }
+
+    let mut missing: BTreeSet<&str> = BTreeSet::new();
+    let mut ordered: Vec<MontyObject> = Vec::with_capacity(expected_input_names.len());
+    for name in expected_input_names {
+        match provided.remove(name) {
+            Some(val) => ordered.push(val),
+            None => {
+                missing.insert(name);
+            }
+        }
+    }
+
+    if !missing.is_empty() {
+        let missing_list = missing.into_iter().collect::<Vec<_>>().join(", ");
+        return Err(rustler::Error::Term(Box::new(format!(
+            "missing required inputs: {missing_list}"
+        ))));
+    }
+
+    if !provided.is_empty() {
+        let mut unexpected = provided.keys().cloned().collect::<Vec<_>>();
+        unexpected.sort();
+        return Err(rustler::Error::Term(Box::new(format!(
+            "unexpected inputs: {}",
+            unexpected.join(", ")
+        ))));
+    }
+
+    Ok(ordered)
 }
 
 // ── Helper: Decode ResourceLimits from Elixir map ────────────────────────────
@@ -402,7 +418,11 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
         }
     }
 
-    if let Ok(val) = term.map_get(Atom::from_str(env, "max_duration_secs").unwrap().encode(env)) {
+    if let Ok(val) = term.map_get(
+        Atom::from_str(env, "max_duration_secs")
+            .unwrap()
+            .encode(env),
+    ) {
         if let Ok(secs) = val.decode::<f64>() {
             limits = limits.max_duration(Duration::from_secs_f64(secs));
         }
@@ -420,8 +440,11 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
         }
     }
 
-    if let Ok(val) = term.map_get(Atom::from_str(env, "max_recursion_depth").unwrap().encode(env))
-    {
+    if let Ok(val) = term.map_get(
+        Atom::from_str(env, "max_recursion_depth")
+            .unwrap()
+            .encode(env),
+    ) {
         if let Ok(n) = val.decode::<usize>() {
             limits = limits.max_recursion_depth(Some(n));
         }
@@ -452,6 +475,126 @@ pub fn encode_os_function<'a>(env: Env<'a>, func: &OsFunction) -> Term<'a> {
         OsFunction::GetEnviron => "get_environ",
     };
     Atom::from_str(env, name).unwrap().encode(env)
+}
+
+fn decode_named_tuple<'a>(
+    env: Env<'a>,
+    type_term: Term<'a>,
+    fields_term: Term<'a>,
+) -> NifResult<MontyObject> {
+    let raw_type_name: String = if type_term.is_atom() {
+        type_term
+            .atom_to_string()
+            .map_err(|_| rustler::Error::BadArg)?
+    } else if type_term.is_binary() {
+        type_term.decode()?
+    } else {
+        return Err(rustler::Error::BadArg);
+    };
+
+    let type_name = normalize_namedtuple_type_name(&raw_type_name);
+
+    // Prefer order-preserving list-of-pairs representation.
+    if fields_term.is_list() {
+        let fields: Vec<Term> = fields_term.decode()?;
+        let mut field_names = Vec::with_capacity(fields.len());
+        let mut values = Vec::with_capacity(fields.len());
+
+        for item in fields {
+            let elems = get_tuple(item).map_err(|_| rustler::Error::BadArg)?;
+            if elems.len() != 2 {
+                return Err(rustler::Error::BadArg);
+            }
+
+            let field_name: String = if elems[0].is_atom() {
+                elems[0]
+                    .atom_to_string()
+                    .map_err(|_| rustler::Error::BadArg)?
+            } else if elems[0].is_binary() {
+                elems[0].decode()?
+            } else {
+                return Err(rustler::Error::BadArg);
+            };
+
+            let value = decode_monty_object(env, elems[1])?;
+            field_names.push(field_name);
+            values.push(value);
+        }
+
+        return Ok(MontyObject::NamedTuple {
+            type_name,
+            field_names,
+            values,
+        });
+    }
+
+    if fields_term.is_map() {
+        let iter = MapIterator::new(fields_term).ok_or(rustler::Error::BadArg)?;
+
+        let mut by_name: HashMap<String, MontyObject> = HashMap::new();
+        for (k, v) in iter {
+            let field_name: String = if k.is_atom() {
+                k.atom_to_string().map_err(|_| rustler::Error::BadArg)?
+            } else if k.is_binary() {
+                k.decode()?
+            } else {
+                return Err(rustler::Error::BadArg);
+            };
+
+            let value = decode_monty_object(env, v)?;
+            by_name.insert(field_name, value);
+        }
+
+        let (field_names, values) = order_named_tuple_fields(&type_name, by_name)?;
+
+        return Ok(MontyObject::NamedTuple {
+            type_name,
+            field_names,
+            values,
+        });
+    }
+
+    Err(rustler::Error::BadArg)
+}
+
+fn normalize_namedtuple_type_name(s: &str) -> String {
+    // Monty uses PascalCase type names for built-in named tuples (e.g. "StatResult").
+    // Allow snake_case inputs for convenience.
+    if s.chars().any(|c| c.is_uppercase()) {
+        s.to_owned()
+    } else {
+        pascal_case(s)
+    }
+}
+
+fn order_named_tuple_fields(
+    type_name: &str,
+    mut by_name: HashMap<String, MontyObject>,
+) -> NifResult<(Vec<String>, Vec<MontyObject>)> {
+    if type_name == "StatResult" {
+        let mut field_names = Vec::with_capacity(STAT_RESULT_FIELD_ORDER.len());
+        let mut values = Vec::with_capacity(STAT_RESULT_FIELD_ORDER.len());
+
+        for name in STAT_RESULT_FIELD_ORDER {
+            let val = by_name.remove(name).ok_or(rustler::Error::BadArg)?;
+            field_names.push(name.to_owned());
+            values.push(val);
+        }
+
+        if !by_name.is_empty() {
+            return Err(rustler::Error::BadArg);
+        }
+
+        return Ok((field_names, values));
+    }
+
+    let mut field_names = by_name.keys().cloned().collect::<Vec<_>>();
+    field_names.sort();
+    let values = field_names
+        .iter()
+        .map(|name| by_name.remove(name).unwrap())
+        .collect();
+    Ok((field_names, values))
 }
 
 fn pascal_case(s: &str) -> String {
