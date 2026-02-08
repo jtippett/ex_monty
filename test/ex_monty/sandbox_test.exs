@@ -66,7 +66,9 @@ defmodule ExMonty.SandboxTest do
       @impl true
       def handle_function("double", [x], _kwargs), do: {:ok, x * 2}
       def handle_function("greet", [name], _kwargs), do: {:ok, "Hello, #{name}!"}
-      def handle_function(name, _args, _kwargs), do: {:error, :name_error, "unknown function: #{name}"}
+
+      def handle_function(name, _args, _kwargs),
+        do: {:error, :name_error, "unknown function: #{name}"}
     end
 
     test "basic module handler" do

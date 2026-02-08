@@ -19,7 +19,7 @@ defmodule ExMonty.Sandbox do
         end
 
         @impl true
-        def handle_os(:read_text, [path], _kwargs) do
+        def handle_os(:read_text, [{:path, path}], _kwargs) do
           case File.read(path) do
             {:ok, content} -> {:ok, content}
             {:error, reason} -> {:error, :file_not_found_error, to_string(reason)}
@@ -30,6 +30,7 @@ defmodule ExMonty.Sandbox do
       {:ok, result, output} = ExMonty.Sandbox.run(code,
         inputs: %{"url" => "https://example.com"},
         handler: MyHandler,
+        external_functions: ["fetch"],
         limits: %{max_duration_secs: 5.0}
       )
 
@@ -62,7 +63,8 @@ defmodule ExMonty.Sandbox do
 
   Should return `{:ok, value}` on success or `{:error, exc_type, message}` on failure.
   """
-  @callback handle_function(name :: String.t(), args :: list(), kwargs :: map()) :: handler_result()
+  @callback handle_function(name :: String.t(), args :: list(), kwargs :: map()) ::
+              handler_result()
 
   @doc """
   Called when Python code performs an OS/filesystem operation.
@@ -95,7 +97,8 @@ defmodule ExMonty.Sandbox do
 
       {:ok, result, output} = ExMonty.Sandbox.run(
         "result = fetch('https://example.com')",
-        handler: MyHandler
+        handler: MyHandler,
+        external_functions: ["fetch"]
       )
 
       {:ok, result, output} = ExMonty.Sandbox.run(
@@ -118,17 +121,19 @@ defmodule ExMonty.Sandbox do
   def run(code, opts \\ []) do
     inputs = Keyword.get(opts, :inputs, %{})
     handler = Keyword.get(opts, :handler)
-    functions = Keyword.get(opts, :functions, %{})
-    os_handlers = Keyword.get(opts, :os, %{})
+    functions = opts |> Keyword.get(:functions, %{}) |> normalize_function_handlers()
+    os_handlers = opts |> Keyword.get(:os, %{}) |> normalize_os_handlers()
     limits = Keyword.get(opts, :limits, nil)
     script_name = Keyword.get(opts, :script_name, "main.py")
 
     external_fns =
-      Keyword.get_lazy(opts, :external_functions, fn ->
-        Map.keys(functions)
-      end)
+      opts
+      |> Keyword.get_lazy(:external_functions, fn -> Map.keys(functions) end)
+      |> Enum.map(&to_string/1)
+      |> Enum.uniq()
+      |> Enum.sort()
 
-    input_names = inputs |> Map.keys() |> Enum.map(&to_string/1)
+    input_names = inputs |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
 
     compile_opts = [
       inputs: input_names,
@@ -204,6 +209,7 @@ defmodule ExMonty.Sandbox do
         rescue
           e -> {:error, :runtime_error, Exception.message(e)}
         end
+        |> normalize_handler_result()
 
       state.handler != nil and function_exported?(state.handler, :handle_function, 3) ->
         try do
@@ -211,6 +217,7 @@ defmodule ExMonty.Sandbox do
         rescue
           e -> {:error, :runtime_error, Exception.message(e)}
         end
+        |> normalize_handler_result()
 
       true ->
         {:error, :name_error, "function '#{name}' is not defined"}
@@ -223,10 +230,17 @@ defmodule ExMonty.Sandbox do
     {new_os, result} =
       cond do
         is_struct(os, ExMonty.PseudoFS) ->
-          case ExMonty.PseudoFS.handle_os(os, function, args, kwargs) do
-            {%ExMonty.PseudoFS{} = new_fs, result} -> {new_fs, result}
-            result -> {os, result}
-          end
+          {new_fs, result} =
+            try do
+              case ExMonty.PseudoFS.handle_os(os, function, args, kwargs) do
+                {%ExMonty.PseudoFS{} = new_fs, result} -> {new_fs, result}
+                result -> {os, result}
+              end
+            rescue
+              e -> {os, {:error, :runtime_error, Exception.message(e)}}
+            end
+
+          {new_fs, normalize_handler_result(result)}
 
         is_map(os) and Map.has_key?(os, function) ->
           result =
@@ -236,7 +250,7 @@ defmodule ExMonty.Sandbox do
               e -> {:error, :runtime_error, Exception.message(e)}
             end
 
-          {os, result}
+          {os, normalize_handler_result(result)}
 
         state.handler != nil and function_exported?(state.handler, :handle_os, 3) ->
           result =
@@ -246,7 +260,7 @@ defmodule ExMonty.Sandbox do
               e -> {:error, :runtime_error, Exception.message(e)}
             end
 
-          {os, result}
+          {os, normalize_handler_result(result)}
 
         true ->
           {os, {:error, :os_error, "OS operation '#{function}' is not permitted"}}
@@ -254,4 +268,71 @@ defmodule ExMonty.Sandbox do
 
     {%{state | os: new_os}, result}
   end
+
+  defp normalize_handler_result({:ok, _} = ok), do: ok
+
+  defp normalize_handler_result({:error, type, message}) when is_atom(type) do
+    {:error, type, to_string(message)}
+  end
+
+  defp normalize_handler_result({:error, message}) do
+    {:error, :runtime_error, to_string(message)}
+  end
+
+  defp normalize_handler_result(other) do
+    {:error, :runtime_error, "handler returned invalid result: #{inspect(other)}"}
+  end
+
+  defp normalize_function_handlers(functions) when is_map(functions) do
+    Enum.into(functions, %{}, fn {k, v} -> {to_string(k), v} end)
+  end
+
+  defp normalize_function_handlers(functions), do: functions
+
+  @os_function_by_name %{
+    "exists" => :exists,
+    "is_file" => :is_file,
+    "is_dir" => :is_dir,
+    "is_symlink" => :is_symlink,
+    "read_text" => :read_text,
+    "read_bytes" => :read_bytes,
+    "write_text" => :write_text,
+    "write_bytes" => :write_bytes,
+    "mkdir" => :mkdir,
+    "unlink" => :unlink,
+    "rmdir" => :rmdir,
+    "iterdir" => :iterdir,
+    "stat" => :stat,
+    "rename" => :rename,
+    "resolve" => :resolve,
+    "absolute" => :absolute,
+    "getenv" => :getenv,
+    "get_environ" => :get_environ
+  }
+
+  defp normalize_os_handlers(%ExMonty.PseudoFS{} = fs), do: fs
+
+  defp normalize_os_handlers(os) when is_map(os) do
+    Enum.reduce(os, %{}, fn {k, v}, acc ->
+      case os_key_to_atom(k) do
+        {:ok, atom} -> Map.put(acc, atom, v)
+        :error -> acc
+      end
+    end)
+  end
+
+  defp normalize_os_handlers(os), do: os
+
+  defp os_key_to_atom(key) when is_atom(key) do
+    if key in Map.values(@os_function_by_name), do: {:ok, key}, else: :error
+  end
+
+  defp os_key_to_atom(key) when is_binary(key) do
+    case Map.fetch(@os_function_by_name, key) do
+      {:ok, atom} -> {:ok, atom}
+      :error -> :error
+    end
+  end
+
+  defp os_key_to_atom(_), do: :error
 end
