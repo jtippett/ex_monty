@@ -150,6 +150,24 @@ defmodule ExMonty.PseudoFSTest do
     end
   end
 
+  describe "rename operations" do
+    test "renaming a directory moves its children" do
+      fs =
+        PseudoFS.new()
+        |> PseudoFS.put_file("/data/a.txt", "a")
+        |> PseudoFS.put_file("/data/sub/b.txt", "b")
+
+      code = """
+      from pathlib import Path
+      Path('/data').rename('/moved')
+      [Path('/moved/a.txt').read_text(), Path('/moved/sub/b.txt').read_text()]
+      """
+
+      {:ok, result, _} = ExMonty.Sandbox.run(code, os: fs)
+      assert result == ["a", "b"]
+    end
+  end
+
   describe "environment variables" do
     test "os.getenv reads virtual env" do
       fs =

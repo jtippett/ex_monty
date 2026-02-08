@@ -143,8 +143,10 @@ defmodule ExMonty.PseudoFS do
   Returns `{:ok, value}` on success or `{:error, exc_type, message}` on failure.
   """
   @spec handle_os(t(), atom(), list(), map()) ::
-          {:ok, term()} | {:error, atom(), String.t()} | {t(), {:ok, term()}} |
-          {t(), {:error, atom(), String.t()}}
+          {:ok, term()}
+          | {:error, atom(), String.t()}
+          | {t(), {:ok, term()}}
+          | {t(), {:error, atom(), String.t()}}
   def handle_os(%__MODULE__{} = fs, function, args, kwargs \\ %{}) do
     case dispatch(fs, function, args, kwargs) do
       {%__MODULE__{} = new_fs, result} -> {new_fs, result}
@@ -158,14 +160,17 @@ defmodule ExMonty.PseudoFS do
     {:ok, fs.env}
   end
 
-  defp dispatch(fs, :getenv, args, _kwargs) do
-    [key | rest] = args
+  defp dispatch(fs, :getenv, [key | rest], _kwargs) do
     default = List.first(rest)
 
     case Map.fetch(fs.env, key) do
       {:ok, value} -> {:ok, value}
       :error -> {:ok, default}
     end
+  end
+
+  defp dispatch(_fs, :getenv, _args, _kwargs) do
+    {:error, :type_error, "getenv() requires a key"}
   end
 
   defp dispatch(fs, :exists, [path | _], _kwargs) do
@@ -234,7 +239,9 @@ defmodule ExMonty.PseudoFS do
 
     cond do
       MapSet.member?(fs.dirs, path) ->
-        if exist_ok, do: {:ok, nil}, else: {:error, :o_s_error, "[Errno 17] File exists: '#{path}'"}
+        if exist_ok,
+          do: {:ok, nil},
+          else: {:error, :os_error, "[Errno 17] File exists: '#{path}'"}
 
       parents ->
         {%{fs | dirs: MapSet.put(ensure_parent_dirs(fs, path <> "/x").dirs, path)}, {:ok, nil}}
@@ -245,8 +252,7 @@ defmodule ExMonty.PseudoFS do
         if MapSet.member?(fs.dirs, parent) do
           {%{fs | dirs: MapSet.put(fs.dirs, path)}, {:ok, nil}}
         else
-          {:error, :file_not_found_error,
-           "[Errno 2] No such file or directory: '#{path}'"}
+          {:error, :file_not_found_error, "[Errno 2] No such file or directory: '#{path}'"}
         end
     end
   end
@@ -272,7 +278,7 @@ defmodule ExMonty.PseudoFS do
           Enum.any?(fs.dirs, fn d -> d != path and String.starts_with?(d, path <> "/") end)
 
       if children do
-        {:error, :o_s_error, "[Errno 39] Directory not empty: '#{path}'"}
+        {:error, :os_error, "[Errno 39] Directory not empty: '#{path}'"}
       else
         {%{fs | dirs: MapSet.delete(fs.dirs, path)}, {:ok, nil}}
       end
@@ -292,14 +298,14 @@ defmodule ExMonty.PseudoFS do
         |> Map.keys()
         |> Enum.filter(fn p ->
           String.starts_with?(p, prefix) and
-            not String.contains?(String.trim_leading(p, prefix), "/")
+            not String.contains?(String.replace_prefix(p, prefix, ""), "/")
         end)
 
       dir_entries =
         fs.dirs
         |> Enum.filter(fn d ->
           d != path and String.starts_with?(d, prefix) and
-            not String.contains?(String.trim_leading(d, prefix), "/")
+            not String.contains?(String.replace_prefix(d, prefix, ""), "/")
         end)
 
       entries = Enum.map(file_entries ++ dir_entries, fn e -> {:path, e} end)
@@ -342,12 +348,7 @@ defmodule ExMonty.PseudoFS do
         {new_fs, {:ok, {:path, target}}}
 
       MapSet.member?(fs.dirs, path) ->
-        new_fs = %{
-          fs
-          | dirs: fs.dirs |> MapSet.delete(path) |> MapSet.put(target)
-        }
-
-        {new_fs, {:ok, {:path, target}}}
+        rename_dir(fs, path, target)
 
       true ->
         file_not_found(path)
@@ -386,6 +387,56 @@ defmodule ExMonty.PseudoFS do
       end)
 
     fs
+  end
+
+  defp rename_dir(%__MODULE__{} = fs, path, target) do
+    if path == "/" do
+      {:error, :os_error, "cannot rename root directory"}
+    else
+      old_prefix = ensure_trailing_slash(path)
+      new_prefix = ensure_trailing_slash(target)
+
+      fs = ensure_parent_dirs(fs, target <> "/x")
+
+      new_files =
+        Enum.reduce(fs.files, %{}, fn {p, v}, acc ->
+          new_path =
+            cond do
+              p == path ->
+                target
+
+              String.starts_with?(p, old_prefix) ->
+                new_prefix <> String.replace_prefix(p, old_prefix, "")
+
+              true ->
+                p
+            end
+
+          Map.put(acc, new_path, v)
+        end)
+
+      new_dirs =
+        fs.dirs
+        |> Enum.map(fn d ->
+          cond do
+            d == path ->
+              target
+
+            String.starts_with?(d, old_prefix) ->
+              new_prefix <> String.replace_prefix(d, old_prefix, "")
+
+            true ->
+              d
+          end
+        end)
+        |> MapSet.new()
+
+      {%{fs | files: new_files, dirs: new_dirs}, {:ok, {:path, target}}}
+    end
+  end
+
+  defp ensure_trailing_slash(path) do
+    if String.ends_with?(path, "/"), do: path, else: path <> "/"
   end
 
   defp stat_result(mode, size, mtime) do
