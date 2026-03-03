@@ -221,6 +221,41 @@ defmodule ExMontyTest do
       assert {:ok, result, ""} = ExMonty.eval("[1, 'two', 3.0, True, None]")
       assert result == [1, "two", 3.0, true, nil]
     end
+
+    test "float infinity" do
+      assert {:ok, :infinity, ""} = ExMonty.eval("float('inf')")
+    end
+
+    test "float negative infinity" do
+      assert {:ok, :neg_infinity, ""} = ExMonty.eval("float('-inf')")
+    end
+
+    test "float nan" do
+      assert {:ok, :nan, ""} = ExMonty.eval("float('nan')")
+    end
+
+    test "infinity round-trip through input" do
+      {:ok, runner} = ExMonty.compile("x", inputs: ["x"])
+      assert {:ok, :infinity, ""} = ExMonty.run(runner, %{"x" => :infinity})
+    end
+
+    test "neg_infinity round-trip through input" do
+      {:ok, runner} = ExMonty.compile("x", inputs: ["x"])
+      assert {:ok, :neg_infinity, ""} = ExMonty.run(runner, %{"x" => :neg_infinity})
+    end
+
+    test "nan round-trip through input" do
+      {:ok, runner} = ExMonty.compile("x", inputs: ["x"])
+      assert {:ok, :nan, ""} = ExMonty.run(runner, %{"x" => :nan})
+    end
+
+    test "infinity in arithmetic" do
+      assert {:ok, :infinity, ""} = ExMonty.eval("float('inf') + 1")
+    end
+
+    test "infinity comparison" do
+      assert {:ok, true, ""} = ExMonty.eval("float('inf') > 1000000")
+    end
   end
 
   describe "print capture" do
@@ -283,6 +318,48 @@ defmodule ExMontyTest do
     test "exception has traceback" do
       {:error, exc} = ExMonty.eval("1 / 0")
       assert is_list(exc.traceback)
+    end
+  end
+
+  describe "unicode strings" do
+    test "basic unicode" do
+      assert {:ok, "café", ""} = ExMonty.eval("'café'")
+    end
+
+    test "unicode length" do
+      assert {:ok, 4, ""} = ExMonty.eval("len('café')")
+    end
+  end
+
+  describe "edge cases" do
+    test "deeply nested list" do
+      code = """
+      x = [1]
+      for i in range(9):
+          x = [x]
+      x
+      """
+
+      assert {:ok, result, ""} = ExMonty.eval(code)
+      assert is_list(result)
+    end
+
+    test "self-referencing list" do
+      code = """
+      x = [1, 2]
+      x.append(x)
+      len(x)
+      """
+
+      assert {:ok, 3, ""} = ExMonty.eval(code)
+    end
+
+    test "empty string eval" do
+      assert {:ok, nil, ""} = ExMonty.eval("")
+    end
+
+    test "comment-only code eval" do
+      assert {:ok, nil, ""} = ExMonty.eval("# just a comment")
     end
   end
 end

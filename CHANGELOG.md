@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Fix dataclass round-trip: `ExMonty.Dataclass` structs returned from handlers are now decoded back to `MontyObject::Dataclass`, preserving field access (`p.x`), frozen semantics, and method calls.
+- Add `field_names` and `type_id` fields to `ExMonty.Dataclass` struct for full fidelity with monty's dataclass representation.
+- Fix float inf/nan encoding: `float('inf')`, `float('-inf')`, and `float('nan')` now encode as `:infinity`, `:neg_infinity`, and `:nan` atoms instead of crashing.
+- Float special atoms round-trip through inputs.
+
 ## 0.2.0
 
 - Update monty to 47427c0 (v0.0.7).

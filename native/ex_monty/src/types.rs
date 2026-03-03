@@ -1,4 +1,4 @@
-use monty::{MontyObject, OsFunction, ResourceLimits};
+use monty::{DictPairs, MontyObject, OsFunction, ResourceLimits};
 use num_bigint::BigInt;
 use rustler::types::atom::Atom;
 use rustler::types::map::MapIterator;
@@ -15,7 +15,19 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
         MontyObject::Bool(b) => b.encode(env),
         MontyObject::Int(i) => i.encode(env),
         MontyObject::BigInt(bi) => bi.encode(env),
-        MontyObject::Float(f) => f.encode(env),
+        MontyObject::Float(f) => {
+            if f.is_infinite() {
+                if f.is_sign_positive() {
+                    Atom::from_str(env, "infinity").unwrap().encode(env)
+                } else {
+                    Atom::from_str(env, "neg_infinity").unwrap().encode(env)
+                }
+            } else if f.is_nan() {
+                Atom::from_str(env, "nan").unwrap().encode(env)
+            } else {
+                f.encode(env)
+            }
+        }
         MontyObject::String(s) => s.encode(env),
         MontyObject::Bytes(b) => {
             let tag = Atom::from_str(env, "bytes").unwrap();
@@ -74,10 +86,10 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
         }
         MontyObject::Dataclass {
             name,
+            type_id,
             field_names,
             attrs,
             frozen,
-            ..
         } => {
             let struct_atom = Atom::from_str(env, "Elixir.ExMonty.Dataclass").unwrap();
             let mut fields_map = rustler::types::map::map_new(env);
@@ -98,6 +110,8 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
                     fields_map = fields_map.map_put(key, value).unwrap();
                 }
             }
+            let field_names_term: Vec<Term> =
+                field_names.iter().map(|s| s.encode(env)).collect();
             rustler::types::map::map_new(env)
                 .map_put(
                     Atom::from_str(env, "__struct__").unwrap().encode(env),
@@ -112,6 +126,16 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
                 .map_put(
                     Atom::from_str(env, "fields").unwrap().encode(env),
                     fields_map,
+                )
+                .unwrap()
+                .map_put(
+                    Atom::from_str(env, "field_names").unwrap().encode(env),
+                    field_names_term.encode(env),
+                )
+                .unwrap()
+                .map_put(
+                    Atom::from_str(env, "type_id").unwrap().encode(env),
+                    type_id.encode(env),
                 )
                 .unwrap()
                 .map_put(
@@ -201,6 +225,9 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
             "true" => Ok(MontyObject::Bool(true)),
             "false" => Ok(MontyObject::Bool(false)),
             "ellipsis" => Ok(MontyObject::Ellipsis),
+            "infinity" => Ok(MontyObject::Float(f64::INFINITY)),
+            "neg_infinity" => Ok(MontyObject::Float(f64::NEG_INFINITY)),
+            "nan" => Ok(MontyObject::Float(f64::NAN)),
             other => Ok(MontyObject::String(other.to_owned())),
         };
     }
@@ -308,6 +335,9 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                         .map(|(k, _v)| decode_monty_object(env, k))
                         .collect::<NifResult<Vec<_>>>()?;
                     return Ok(MontyObject::Set(items));
+                }
+                if struct_name == "Elixir.ExMonty.Dataclass" {
+                    return decode_dataclass(env, term);
                 }
             }
         }
@@ -555,6 +585,70 @@ fn decode_named_tuple<'a>(
     }
 
     Err(rustler::Error::BadArg)
+}
+
+fn decode_dataclass<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyObject> {
+    let name_key = Atom::from_str(env, "name").unwrap().encode(env);
+    let name: String = term
+        .map_get(name_key)
+        .map_err(|_| rustler::Error::BadArg)?
+        .decode()?;
+
+    let frozen_key = Atom::from_str(env, "frozen").unwrap().encode(env);
+    let frozen: bool = term
+        .map_get(frozen_key)
+        .map_err(|_| rustler::Error::BadArg)?
+        .decode()
+        .unwrap_or(false);
+
+    let type_id_key = Atom::from_str(env, "type_id").unwrap().encode(env);
+    let type_id: u64 = term
+        .map_get(type_id_key)
+        .ok()
+        .and_then(|t| {
+            if t.is_atom() {
+                None // nil atom
+            } else {
+                t.decode::<u64>().ok()
+            }
+        })
+        .unwrap_or(0);
+
+    let fields_key = Atom::from_str(env, "fields").unwrap().encode(env);
+    let fields_term = term
+        .map_get(fields_key)
+        .map_err(|_| rustler::Error::BadArg)?;
+    let fields_iter = MapIterator::new(fields_term).ok_or(rustler::Error::BadArg)?;
+
+    let mut pairs: Vec<(MontyObject, MontyObject)> = Vec::new();
+    let mut derived_field_names: Vec<String> = Vec::new();
+    for (k, v) in fields_iter {
+        let key_str: String = k.decode()?;
+        let val = decode_monty_object(env, v)?;
+        derived_field_names.push(key_str.clone());
+        pairs.push((MontyObject::String(key_str), val));
+    }
+
+    let field_names_key = Atom::from_str(env, "field_names").unwrap().encode(env);
+    let field_names: Vec<String> = term
+        .map_get(field_names_key)
+        .ok()
+        .and_then(|t| {
+            if t.is_atom() {
+                None // nil atom
+            } else {
+                t.decode::<Vec<String>>().ok()
+            }
+        })
+        .unwrap_or(derived_field_names);
+
+    Ok(MontyObject::Dataclass {
+        name,
+        type_id,
+        field_names,
+        attrs: DictPairs::from(pairs),
+        frozen,
+    })
 }
 
 fn normalize_namedtuple_type_name(s: &str) -> String {

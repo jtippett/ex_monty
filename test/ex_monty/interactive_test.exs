@@ -98,10 +98,40 @@ defmodule ExMonty.InteractiveTest do
       assert {:error, _} = ExMonty.resume(snapshot, {:ok, "result2"})
     end
 
+    test "method_call progress tag for dataclass methods" do
+      code = """
+      o = make_obj()
+      o.do_thing()
+      """
+
+      {:ok, runner} = ExMonty.compile(code, external_functions: ["make_obj", "do_thing"])
+      {:ok, progress} = ExMonty.start(runner)
+
+      # First call: make_obj returns a dataclass with methods
+      assert {:function_call, call1, snap1, _} = progress
+      assert call1.name == "make_obj"
+
+      dc = %ExMonty.Dataclass{
+        name: "Obj",
+        fields: %{"x" => 1},
+        frozen: false
+      }
+
+      {:ok, progress2} = ExMonty.resume(snap1, {:ok, dc})
+
+      # Second call should be a method_call tag
+      assert {:method_call, call2, snap2, _} = progress2
+      assert call2.name == "do_thing"
+
+      {:ok, final} = ExMonty.resume(snap2, {:ok, "done"})
+      assert {:complete, "done", _} = final
+    end
+
     test "start with resource limits" do
       {:ok, runner} = ExMonty.compile("2 + 2")
       {:ok, progress} = ExMonty.start(runner, %{}, limits: %{max_duration_secs: 5.0})
       assert {:complete, 4, _} = progress
     end
   end
+
 end
