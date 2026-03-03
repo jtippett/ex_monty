@@ -4,7 +4,7 @@ mod resources;
 mod serialization;
 mod types;
 
-use monty::{CollectStringPrint, LimitedTracker, ResourceLimits};
+use monty::{LimitedTracker, PrintWriter, ResourceLimits};
 use resources::RunnerResource;
 use rustler::{Encoder, Env, NifResult, ResourceArc, Term};
 
@@ -35,13 +35,13 @@ fn run<'a>(
     let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
     let resource_limits = types::decode_resource_limits(limits)?;
     let tracker = LimitedTracker::new(resource_limits);
-    let mut print = CollectStringPrint::new();
+    let mut print = PrintWriter::Collect(String::new());
 
     let result = runner_ref
         .run(monty_inputs, tracker, &mut print)
         .map_err(error::monty_exception_to_rustler_error)?;
 
-    let output = print.into_output();
+    let output = print.collected_output().unwrap_or("").to_owned();
     let result_term = types::encode_monty_object(env, &result);
     let output_term = output.encode(env);
     Ok(rustler::types::tuple::make_tuple(
@@ -58,14 +58,14 @@ fn run_no_limits<'a>(
 ) -> NifResult<Term<'a>> {
     let runner_ref = runner.runner();
     let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
-    let mut print = CollectStringPrint::new();
+    let mut print = PrintWriter::Collect(String::new());
     let tracker = LimitedTracker::new(ResourceLimits::new());
 
     let result = runner_ref
         .run(monty_inputs, tracker, &mut print)
         .map_err(error::monty_exception_to_rustler_error)?;
 
-    let output = print.into_output();
+    let output = print.collected_output().unwrap_or("").to_owned();
     let result_term = types::encode_monty_object(env, &result);
     let output_term = output.encode(env);
     Ok(rustler::types::tuple::make_tuple(

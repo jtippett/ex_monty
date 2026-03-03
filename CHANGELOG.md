@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0
+
+- Update monty to 47427c0 (v0.0.7).
+- Support dataclass method calls (new `:method_call` tag in interactive mode).
+- Upstream: `filter()`, `map()`, `getattr()` builtins, `dict(iterable)`, dataclass methods, `asyncio.run()`, user-defined function calling.
+- Upstream: `MontyException` and `StackFrame` now serializable.
+- Upstream: improved resource limit enforcement (time check rate-limiting, 4x pow safety multiplier, catchable RecursionError).
+- Upstream: bug fixes for string comparison, async stack overflow, i64::MIN division overflow.
+- PrintWriter refactored from trait to enum (internal change, no public API impact).
+
+## 0.1.1
+
+- Update monty to v0.0.4 (86712b6) — includes fuzz testing, small-tuple optimizations, AST depth overflow fix, and `id()` memory leak fix.
+
 ## 0.1.0
 
 - Initial release.

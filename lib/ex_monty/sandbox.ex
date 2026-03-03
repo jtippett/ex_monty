@@ -167,6 +167,18 @@ defmodule ExMonty.Sandbox do
             {:error, reason}
         end
 
+      {:method_call, %ExMonty.FunctionCall{} = call, snapshot, output} ->
+        acc_output = acc_output <> output
+        result = dispatch_function(call.name, call.args, call.kwargs, state)
+
+        case ExMonty.resume(snapshot, result) do
+          {:ok, next_progress} ->
+            loop(next_progress, state, acc_output)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
       {:os_call, %ExMonty.OsCall{} = call, snapshot, output} ->
         acc_output = acc_output <> output
         {state, result} = dispatch_os(call.function, call.args, call.kwargs, state)

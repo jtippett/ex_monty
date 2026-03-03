@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = { version = "0.37", features = ["big_integer"] }
-monty = { git = "https://github.com/pydantic/monty.git", rev = "102630b29a677d199be9586a0bf98bf2467dba2f" }
+monty = { git = "https://github.com/pydantic/monty.git", rev = "47427c03df805065de6074012a949a4e08fc45f2" }
 num-bigint = "0.4"
 postcard = { version = "1.1", features = ["alloc"] }
 

@@ -1,6 +1,4 @@
-use monty::{
-    CollectStringPrint, ExternalResult, LimitedTracker, MontyException, MontyObject, RunProgress,
-};
+use monty::{ExternalResult, LimitedTracker, MontyException, MontyObject, PrintWriter, RunProgress};
 use rustler::types::atom::Atom;
 use rustler::{Encoder, Env, NifResult, ResourceArc, Term};
 
@@ -19,13 +17,13 @@ fn start<'a>(
     let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
     let resource_limits = types::decode_resource_limits(limits)?;
     let tracker = LimitedTracker::new(resource_limits);
-    let mut print = CollectStringPrint::new();
+    let mut print = PrintWriter::Collect(String::new());
 
     let progress = monty_run
         .start(monty_inputs, tracker, &mut print)
         .map_err(|e| error::monty_exception_to_rustler_error(e))?;
 
-    let output = print.into_output();
+    let output = print.collected_output().unwrap_or("").to_owned();
     encode_run_progress(env, progress, &output)
 }
 
@@ -40,13 +38,13 @@ fn resume<'a>(
         .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("snapshot already consumed")))?;
 
     let external_result = decode_external_result(env, result)?;
-    let mut print = CollectStringPrint::new();
+    let mut print = PrintWriter::Collect(String::new());
 
     let progress = snap
         .run(external_result, &mut print)
         .map_err(|e| error::monty_exception_to_rustler_error(e))?;
 
-    let output = print.into_output();
+    let output = print.collected_output().unwrap_or("").to_owned();
     encode_run_progress(env, progress, &output)
 }
 
@@ -68,13 +66,13 @@ fn resume_futures<'a>(
         })
         .collect::<NifResult<Vec<_>>>()?;
 
-    let mut print = CollectStringPrint::new();
+    let mut print = PrintWriter::Collect(String::new());
 
     let progress = future_snap
         .resume(external_results, &mut print)
         .map_err(|e| error::monty_exception_to_rustler_error(e))?;
 
-    let output = print.into_output();
+    let output = print.collected_output().unwrap_or("").to_owned();
     encode_run_progress(env, progress, &output)
 }
 
@@ -100,9 +98,14 @@ fn encode_run_progress<'a>(
             args,
             kwargs,
             call_id,
+            method_call,
             state,
         } => {
-            let tag = Atom::from_str(env, "function_call").unwrap();
+            let tag = if method_call {
+                Atom::from_str(env, "method_call").unwrap()
+            } else {
+                Atom::from_str(env, "function_call").unwrap()
+            };
             let call = encode_function_call(env, &function_name, &args, &kwargs, call_id);
             let snapshot_ref = ResourceArc::new(SnapshotResource::new(state));
             Ok(rustler::types::tuple::make_tuple(
