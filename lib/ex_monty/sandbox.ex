@@ -2,8 +2,12 @@ defmodule ExMonty.Sandbox do
   @moduledoc """
   High-level handler for interactive Python execution.
 
-  The Sandbox automates the start/resume loop by dispatching function calls
-  and OS calls to handler callbacks.
+  The Sandbox automates the start/resume loop by dispatching function calls,
+  dataclass method calls, and OS calls to handler callbacks.
+
+  Dataclass method calls are dispatched through the same function handlers as
+  regular external function calls. The method name is looked up in the `:functions`
+  map or dispatched to `handle_function/3` in the `:handler` module.
 
   ## Module-based Handler
 

@@ -32,11 +32,16 @@ defmodule ExMonty do
       {:ok, progress} = ExMonty.start(runner, %{"url" => "https://example.com"})
 
       case progress do
-        {:function_call, call, snapshot, output} ->
+        {:function_call, call, snapshot, _output} ->
           response = do_fetch(call.name, call.args)
           {:ok, next} = ExMonty.resume(snapshot, {:ok, response})
 
-        {:complete, value, output} ->
+        {:method_call, call, snapshot, _output} ->
+          # Dataclass method call — call.args[0] is the instance
+          result = handle_method(call.name, call.args, call.kwargs)
+          {:ok, next} = ExMonty.resume(snapshot, result)
+
+        {:complete, value, _output} ->
           value
       end
 
@@ -60,6 +65,7 @@ defmodule ExMonty do
 
   @type progress ::
           {:function_call, ExMonty.FunctionCall.t(), snapshot(), String.t()}
+          | {:method_call, ExMonty.FunctionCall.t(), snapshot(), String.t()}
           | {:os_call, ExMonty.OsCall.t(), snapshot(), String.t()}
           | {:resolve_futures, future_snapshot(), String.t()}
           | {:complete, term(), String.t()}
@@ -184,6 +190,8 @@ defmodule ExMonty do
   ## Progress Values
 
     * `{:function_call, %ExMonty.FunctionCall{}, snapshot, output}` — paused at external function call
+    * `{:method_call, %ExMonty.FunctionCall{}, snapshot, output}` — paused at dataclass method call
+      (first arg is the dataclass instance)
     * `{:os_call, %ExMonty.OsCall{}, snapshot, output}` — paused at OS/filesystem operation
     * `{:resolve_futures, future_snapshot, output}` — paused waiting for async futures
     * `{:complete, value, output}` — execution finished
