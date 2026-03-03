@@ -165,7 +165,18 @@ mix test
 All 90+ tests should pass. If upstream changed behavior (not just API), some
 assertions may need updating.
 
-### 3.5 Add tests for new functionality
+### 3.5 Update documentation
+
+If new progress tags, types, or call signatures were added, update the docs:
+- `ExMonty` moduledoc — `@type progress`, "Progress Values" list, interactive examples
+- `ExMonty.FunctionCall` / `ExMonty.OsCall` moduledocs — field descriptions, usage context
+- `ExMonty.Sandbox` moduledoc — handler dispatch behavior
+- Typespec changes on any public function whose signature changed
+
+This is easy to miss — any new tag or struct field that reaches the Elixir side
+needs corresponding doc updates.
+
+### 3.6 Add tests for new functionality
 
 If new MontyObject variants or OsFunction variants were added, write tests
 exercising them through `ExMonty.eval/2` or the sandbox.
