@@ -172,6 +172,47 @@ defmodule ExMonty.DataclassTest do
 
       assert result == [1, 2, 3]
     end
+
+    test "factory function passes args into dataclass fields" do
+      functions = %{
+        "make_user" => fn [name], _kwargs ->
+          {:ok,
+           %ExMonty.Dataclass{
+             name: "User",
+             fields: %{"name" => name, "active" => true},
+             frozen: true
+           }}
+        end
+      }
+
+      code = """
+      u = make_user("Alice")
+      [u.name, u.active]
+      """
+
+      {:ok, result, _output} = ExMonty.Sandbox.run(code, functions: functions)
+      assert result == ["Alice", true]
+    end
+
+    test "empty dataclass round-trips" do
+      test_pid = self()
+
+      functions = %{
+        "make_empty" => fn _args, _kwargs ->
+          {:ok, %ExMonty.Dataclass{name: "Empty", fields: %{}, frozen: true}}
+        end,
+        "check" => fn [val], _kwargs ->
+          send(test_pid, {:received, val})
+          {:ok, "ok"}
+        end
+      }
+
+      {:ok, _result, _output} =
+        ExMonty.Sandbox.run("e = make_empty()\ncheck(e)", functions: functions)
+
+      assert_receive {:received, %ExMonty.Dataclass{name: "Empty", fields: fields, frozen: true}}
+      assert fields == %{}
+    end
   end
 
   describe "dataclass method_call dispatch" do
