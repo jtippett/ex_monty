@@ -20,7 +20,7 @@ filesystem access.
 ```elixir
 def deps do
   [
-    {:ex_monty, "~> 0.2"}
+    {:ex_monty, "~> 0.3"}
   ]
 end
 ```
@@ -71,12 +71,13 @@ the result.
 
 ### Low-Level API
 
+External functions are auto-detected at runtime — no upfront declaration needed.
+When Python code calls an undefined function, execution pauses with a
+`:function_call` progress tag. When code references an undefined name without
+calling it, execution pauses with `:name_lookup`.
+
 ```elixir
-{:ok, runner} = ExMonty.compile(
-  "result = fetch(url)\nresult",
-  inputs: ["url"],
-  external_functions: ["fetch"]
-)
+{:ok, runner} = ExMonty.compile("result = fetch(url)\nresult", inputs: ["url"])
 
 {:ok, progress} = ExMonty.start(runner, %{"url" => "https://example.com"})
 
@@ -85,6 +86,10 @@ case progress do
     # call.name == "fetch", call.args == ["https://example.com"]
     response = do_fetch(call.args)
     {:ok, next} = ExMonty.resume(snapshot, {:ok, response})
+
+  {:name_lookup, name, snapshot, output} ->
+    # Provide a function object or value for the undefined name
+    {:ok, next} = ExMonty.resume(snapshot, {:ok, {:function, name}})
 
   {:os_call, call, snapshot, output} ->
     # call.function == :read_text, call.args == [{:path, "/some/file"}]
@@ -123,10 +128,7 @@ defmodule MyHandler do
   end
 end
 
-{:ok, result, _output} = ExMonty.Sandbox.run(code,
-  handler: MyHandler,
-  external_functions: ["fetch"]
-)
+{:ok, result, _output} = ExMonty.Sandbox.run(code, handler: MyHandler)
 ```
 
 ## Pseudo Filesystem

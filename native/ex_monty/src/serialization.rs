@@ -1,7 +1,9 @@
 use monty::{LimitedTracker, MontyRun};
 use rustler::{Binary, Env, NifResult, OwnedBinary, ResourceArc};
 
-use crate::resources::{FutureSnapshotResource, RunnerResource, SnapshotResource};
+use crate::resources::{
+    FutureSnapshotResource, RunnerResource, SnapshotKind, SnapshotResource,
+};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RunnerDump {
@@ -51,7 +53,7 @@ fn dump_snapshot(env: Env, snapshot: ResourceArc<SnapshotResource>) -> NifResult
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn load_snapshot(binary: Binary) -> NifResult<ResourceArc<SnapshotResource>> {
-    let snap: monty::Snapshot<LimitedTracker> = postcard::from_bytes(binary.as_slice())
+    let snap: SnapshotKind = postcard::from_bytes(binary.as_slice())
         .map_err(|e| rustler::Error::RaiseTerm(Box::new(format!("deserialization error: {e}"))))?;
     Ok(ResourceArc::new(SnapshotResource::new(snap)))
 }
@@ -76,7 +78,8 @@ fn dump_future_snapshot(
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn load_future_snapshot(binary: Binary) -> NifResult<ResourceArc<FutureSnapshotResource>> {
-    let snap: monty::FutureSnapshot<LimitedTracker> = postcard::from_bytes(binary.as_slice())
+    let snap: monty::ResolveFutures<LimitedTracker> = postcard::from_bytes(binary.as_slice())
         .map_err(|e| rustler::Error::RaiseTerm(Box::new(format!("deserialization error: {e}"))))?;
     Ok(ResourceArc::new(FutureSnapshotResource::new(snap)))
 }
+

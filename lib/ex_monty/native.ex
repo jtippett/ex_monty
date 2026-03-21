@@ -6,7 +6,7 @@ defmodule ExMonty.Native do
     crate: "ex_monty"
 
   # Core
-  def compile(_code, _script_name, _input_names, _external_fns),
+  def compile(_code, _script_name, _input_names),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def run(_runner, _inputs, _limits), do: :erlang.nif_error(:nif_not_loaded)

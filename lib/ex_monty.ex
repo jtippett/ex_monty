@@ -24,14 +24,15 @@ defmodule ExMonty do
 
   ## Interactive Execution
 
-      {:ok, runner} = ExMonty.compile("result = fetch(url)",
-        inputs: ["url"],
-        external_functions: ["fetch"]
-      )
+      {:ok, runner} = ExMonty.compile("result = fetch(url)", inputs: ["url"])
 
       {:ok, progress} = ExMonty.start(runner, %{"url" => "https://example.com"})
 
       case progress do
+        {:name_lookup, name, snapshot, _output} ->
+          # Provide a function object for the undefined name
+          {:ok, next} = ExMonty.resume(snapshot, {:ok, {:function, name}})
+
         {:function_call, call, snapshot, _output} ->
           response = do_fetch(call.name, call.args)
           {:ok, next} = ExMonty.resume(snapshot, {:ok, response})
@@ -67,6 +68,7 @@ defmodule ExMonty do
           {:function_call, ExMonty.FunctionCall.t(), snapshot(), String.t()}
           | {:method_call, ExMonty.FunctionCall.t(), snapshot(), String.t()}
           | {:os_call, ExMonty.OsCall.t(), snapshot(), String.t()}
+          | {:name_lookup, String.t(), snapshot(), String.t()}
           | {:resolve_futures, future_snapshot(), String.t()}
           | {:complete, term(), String.t()}
 
@@ -75,33 +77,31 @@ defmodule ExMonty do
 
   The runner can be executed multiple times with different inputs via `run/3` or `start/3`.
 
+  External function names no longer need to be declared upfront — they are
+  auto-detected at runtime via name lookup. When the code references an undefined
+  name, execution pauses with a `{:name_lookup, name, snapshot, output}` progress
+  tuple, allowing the host to provide a value or function.
+
   ## Options
 
     * `:inputs` - list of input variable names (default: `[]`)
-    * `:external_functions` - list of external function names that will pause execution (default: `[]`)
     * `:script_name` - name for the script in tracebacks (default: `"main.py"`)
 
   ## Examples
 
       {:ok, runner} = ExMonty.compile("result = x * 2", inputs: ["x"])
 
-      {:ok, runner} = ExMonty.compile("result = fetch(url)",
-        inputs: ["url"],
-        external_functions: ["fetch"]
-      )
+      {:ok, runner} = ExMonty.compile("result = fetch(url)", inputs: ["url"])
   """
   @spec compile(String.t(), keyword()) :: {:ok, runner()} | {:error, error_reason()}
   def compile(code, opts \\ []) do
     inputs = opts |> Keyword.get(:inputs, []) |> Enum.map(&to_string/1)
-    external_fns = opts |> Keyword.get(:external_functions, []) |> Enum.map(&to_string/1)
     script_name = opts |> Keyword.get(:script_name, "main.py") |> to_string()
 
-    with :ok <- validate_name_list("inputs", inputs),
-         :ok <- validate_name_list("external_functions", external_fns) do
+    with :ok <- validate_name_list("inputs", inputs) do
       inputs = Enum.sort(inputs)
-      external_fns = Enum.sort(external_fns)
 
-      case Native.compile(code, script_name, inputs, external_fns) do
+      case Native.compile(code, script_name, inputs) do
         {:ok, runner} -> {:ok, runner}
         {:error, reason} -> {:error, reason}
         runner when is_reference(runner) -> {:ok, runner}
@@ -168,7 +168,6 @@ defmodule ExMonty do
 
     compile_opts = [
       inputs: input_names,
-      external_functions: Keyword.get(opts, :external_functions, []),
       script_name: script_name
     ]
 
@@ -189,6 +188,9 @@ defmodule ExMonty do
 
   ## Progress Values
 
+    * `{:name_lookup, name, snapshot, output}` — paused at unresolved name lookup.
+      Resume with `{:ok, {:function, name}}` to provide a callable, `{:ok, value}` for a
+      constant, or `:undefined` to raise `NameError`.
     * `{:function_call, %ExMonty.FunctionCall{}, snapshot, output}` — paused at external function call
     * `{:method_call, %ExMonty.FunctionCall{}, snapshot, output}` — paused at dataclass method call
       (first arg is the dataclass instance)
@@ -198,16 +200,14 @@ defmodule ExMonty do
 
   ## Examples
 
-      {:ok, runner} = ExMonty.compile("result = fetch(url)",
-        inputs: ["url"],
-        external_functions: ["fetch"]
-      )
+      {:ok, runner} = ExMonty.compile("result = fetch(url)", inputs: ["url"])
 
-      {:ok, {:function_call, call, snapshot, _output}} =
+      {:ok, {:name_lookup, "fetch", snapshot, _output}} =
         ExMonty.start(runner, %{"url" => "https://example.com"})
 
-      call.name  # "fetch"
-      call.args  # ["https://example.com"]
+      # Provide the function, then handle the actual call
+      {:ok, {:function_call, call, snapshot2, _}} =
+        ExMonty.resume(snapshot, {:ok, {:function, "fetch"}})
   """
   @spec start(runner(), map(), keyword()) :: {:ok, progress()} | {:error, error_reason()}
   def start(runner, inputs \\ %{}, opts \\ []) do
@@ -227,15 +227,25 @@ defmodule ExMonty do
   @doc """
   Resumes interactive execution from a snapshot with a result value.
 
-  The result should be `{:ok, value}` for successful returns or
-  `{:error, type, message}` for errors.
+  For `:function_call`, `:method_call`, and `:os_call` snapshots, the result
+  should be `{:ok, value}` for successful returns or `{:error, type, message}` for errors.
+
+  For `:name_lookup` snapshots, the result should be:
+    * `{:ok, {:function, name}}` — provide a callable function object
+    * `{:ok, value}` — provide any value for the name
+    * `:undefined` — raise `NameError` in Python
 
   ## Examples
 
+      # Function call result
       {:ok, next_progress} = ExMonty.resume(snapshot, {:ok, "response body"})
       {:ok, next_progress} = ExMonty.resume(snapshot, {:error, :runtime_error, "fetch failed"})
+
+      # Name lookup result
+      {:ok, next_progress} = ExMonty.resume(snapshot, {:ok, {:function, "my_func"}})
+      {:ok, next_progress} = ExMonty.resume(snapshot, :undefined)
   """
-  @spec resume(snapshot(), {:ok, term()} | {:error, atom(), String.t()}) ::
+  @spec resume(snapshot(), {:ok, term()} | {:error, atom(), String.t()} | :undefined) ::
           {:ok, progress()} | {:error, error_reason()}
   def resume(snapshot, result) do
     case Native.resume(snapshot, result) do

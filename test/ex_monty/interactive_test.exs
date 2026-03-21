@@ -4,10 +4,7 @@ defmodule ExMonty.InteractiveTest do
   describe "start/resume" do
     test "single function call" do
       {:ok, runner} =
-        ExMonty.compile("result = fetch(url)\nresult",
-          inputs: ["url"],
-          external_functions: ["fetch"]
-        )
+        ExMonty.compile("result = fetch(url)\nresult", inputs: ["url"])
 
       {:ok, progress} = ExMonty.start(runner, %{"url" => "https://example.com"})
 
@@ -27,7 +24,7 @@ defmodule ExMonty.InteractiveTest do
       a + ' ' + b
       """
 
-      {:ok, runner} = ExMonty.compile(code, external_functions: ["fetch"])
+      {:ok, runner} = ExMonty.compile(code)
       {:ok, progress} = ExMonty.start(runner)
 
       # First call
@@ -55,7 +52,7 @@ defmodule ExMonty.InteractiveTest do
       result
       """
 
-      {:ok, runner} = ExMonty.compile(code, external_functions: ["fetch"])
+      {:ok, runner} = ExMonty.compile(code)
       {:ok, progress} = ExMonty.start(runner)
 
       assert {:function_call, _call, snapshot, _} = progress
@@ -70,7 +67,7 @@ defmodule ExMonty.InteractiveTest do
       result
       """
 
-      {:ok, runner} = ExMonty.compile(code, external_functions: ["fetch"])
+      {:ok, runner} = ExMonty.compile(code)
       {:ok, progress} = ExMonty.start(runner)
 
       assert {:function_call, call, _snapshot, _} = progress
@@ -86,8 +83,7 @@ defmodule ExMonty.InteractiveTest do
     end
 
     test "snapshot is consumed after resume" do
-      {:ok, runner} =
-        ExMonty.compile("fetch('url')", external_functions: ["fetch"])
+      {:ok, runner} = ExMonty.compile("fetch('url')")
 
       {:ok, {:function_call, _call, snapshot, _}} = ExMonty.start(runner)
 
@@ -104,7 +100,7 @@ defmodule ExMonty.InteractiveTest do
       o.do_thing()
       """
 
-      {:ok, runner} = ExMonty.compile(code, external_functions: ["make_obj", "do_thing"])
+      {:ok, runner} = ExMonty.compile(code)
       {:ok, progress} = ExMonty.start(runner)
 
       # First call: make_obj returns a dataclass with methods
@@ -134,4 +130,70 @@ defmodule ExMonty.InteractiveTest do
     end
   end
 
+  describe "name_lookup" do
+    test "name lookup for value reference" do
+      # Referencing a name without calling it triggers NameLookup
+      code = """
+      x = config_value
+      x + 1
+      """
+
+      {:ok, runner} = ExMonty.compile(code)
+      {:ok, progress} = ExMonty.start(runner)
+
+      assert {:name_lookup, "config_value", snapshot, _output} = progress
+
+      {:ok, next} = ExMonty.resume(snapshot, {:ok, 42})
+      assert {:complete, 43, _} = next
+    end
+
+    test "name lookup with undefined returns NameError" do
+      code = "x = unknown_name"
+
+      {:ok, runner} = ExMonty.compile(code)
+      {:ok, progress} = ExMonty.start(runner)
+
+      assert {:name_lookup, "unknown_name", snapshot, _output} = progress
+
+      assert {:error, exc} = ExMonty.resume(snapshot, :undefined)
+      assert %{type: :name_error} = exc
+    end
+
+    test "name lookup provides function object for later call" do
+      # Loading a function reference, then calling it later
+      code = """
+      callback = my_func
+      callback(10)
+      """
+
+      {:ok, runner} = ExMonty.compile(code)
+      {:ok, progress} = ExMonty.start(runner)
+
+      # First: name lookup for my_func
+      assert {:name_lookup, "my_func", snapshot, _} = progress
+
+      # Provide a function object
+      {:ok, progress2} = ExMonty.resume(snapshot, {:ok, {:function, "my_func"}})
+
+      # Then the function is called
+      assert {:function_call, call, snap2, _} = progress2
+      assert call.name == "my_func"
+      assert call.args == [10]
+
+      {:ok, final} = ExMonty.resume(snap2, {:ok, "result"})
+      assert {:complete, "result", _} = final
+    end
+
+    test "name lookup with sandbox auto-resolves known functions" do
+      {:ok, result, _output} =
+        ExMonty.Sandbox.run(
+          "callback = double\ncallback(21)",
+          functions: %{
+            "double" => fn [x], _kwargs -> {:ok, x * 2} end
+          }
+        )
+
+      assert result == 42
+    end
+  end
 end

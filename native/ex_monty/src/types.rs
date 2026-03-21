@@ -188,6 +188,14 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
             let tag = Atom::from_str(env, "cycle").unwrap();
             rustler::types::tuple::make_tuple(env, &[tag.encode(env), desc.encode(env)])
         }
+        MontyObject::Function { name, docstring } => {
+            let tag = Atom::from_str(env, "function").unwrap();
+            let doc = match docstring {
+                Some(d) => d.encode(env),
+                None => rustler::types::atom::nil().encode(env),
+            };
+            rustler::types::tuple::make_tuple(env, &[tag.encode(env), name.encode(env), doc])
+        }
     }
 }
 
@@ -284,7 +292,35 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                         let repr: String = elements[1].decode()?;
                         return Ok(MontyObject::Repr(repr));
                     }
+                    "function" => {
+                        let name: String = elements[1].decode()?;
+                        return Ok(MontyObject::Function {
+                            name,
+                            docstring: None,
+                        });
+                    }
                     _ => {}
+                }
+            }
+        }
+        // {:function, name, docstring}
+        if elements.len() == 3 {
+            if let Ok(tag) = elements[0].atom_to_string() {
+                if tag == "function" {
+                    let name: String = elements[1].decode()?;
+                    let docstring: Option<String> = if elements[2].is_atom() {
+                        let s = elements[2]
+                            .atom_to_string()
+                            .map_err(|_| rustler::Error::BadArg)?;
+                        if s == "nil" {
+                            None
+                        } else {
+                            Some(s)
+                        }
+                    } else {
+                        Some(elements[2].decode()?)
+                    };
+                    return Ok(MontyObject::Function { name, docstring });
                 }
             }
         }

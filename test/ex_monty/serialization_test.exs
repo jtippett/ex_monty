@@ -29,10 +29,7 @@ defmodule ExMonty.SerializationTest do
 
   describe "snapshot dump/load" do
     test "roundtrip snapshot" do
-      {:ok, runner} =
-        ExMonty.compile("result = fetch('url')\nresult",
-          external_functions: ["fetch"]
-        )
+      {:ok, runner} = ExMonty.compile("result = fetch('url')\nresult")
 
       {:ok, {:function_call, _call, snapshot, _}} = ExMonty.start(runner)
 

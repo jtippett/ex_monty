@@ -2,8 +2,13 @@ defmodule ExMonty.Sandbox do
   @moduledoc """
   High-level handler for interactive Python execution.
 
-  The Sandbox automates the start/resume loop by dispatching function calls,
-  dataclass method calls, and OS calls to handler callbacks.
+  The Sandbox automates the start/resume loop by dispatching name lookups,
+  function calls, dataclass method calls, and OS calls to handler callbacks.
+
+  External function names are auto-detected at runtime: when Python code
+  references an undefined name, the sandbox checks the `:functions` map and
+  `:handler` module to decide whether to provide a function object or raise
+  `NameError`. No upfront declaration of external functions is needed.
 
   Dataclass method calls are dispatched through the same function handlers as
   regular external function calls. The method name is looked up in the `:functions`
@@ -34,7 +39,6 @@ defmodule ExMonty.Sandbox do
       {:ok, result, output} = ExMonty.Sandbox.run(code,
         inputs: %{"url" => "https://example.com"},
         handler: MyHandler,
-        external_functions: ["fetch"],
         limits: %{max_duration_secs: 5.0}
       )
 
@@ -77,7 +81,15 @@ defmodule ExMonty.Sandbox do
   """
   @callback handle_os(function :: atom(), args :: list(), kwargs :: map()) :: handler_result()
 
-  @optional_callbacks [handle_os: 3]
+  @doc """
+  Called when Python code references an undefined name.
+
+  Return `{:ok, value}` to provide the value, or `:undefined` to raise `NameError`.
+  For external functions, return `{:ok, {:function, name}}`.
+  """
+  @callback handle_name_lookup(name :: String.t()) :: {:ok, term()} | :undefined
+
+  @optional_callbacks [handle_os: 3, handle_name_lookup: 1]
 
   @doc """
   Compiles and runs Python code with automatic handler dispatch.
@@ -91,7 +103,6 @@ defmodule ExMonty.Sandbox do
       * An `ExMonty.PseudoFS` struct for in-memory filesystem
       * A map of `%{atom => fn args, kwargs -> result}` for per-function handlers
     * `:limits` - resource limits map (default: `nil`)
-    * `:external_functions` - list of external function names (auto-detected from `:functions`)
     * `:script_name` - script name for tracebacks (default: `"main.py"`)
 
   Either `:handler` or `:functions` must be provided for external function calls.
@@ -101,8 +112,7 @@ defmodule ExMonty.Sandbox do
 
       {:ok, result, output} = ExMonty.Sandbox.run(
         "result = fetch('https://example.com')",
-        handler: MyHandler,
-        external_functions: ["fetch"]
+        handler: MyHandler
       )
 
       {:ok, result, output} = ExMonty.Sandbox.run(
@@ -130,18 +140,10 @@ defmodule ExMonty.Sandbox do
     limits = Keyword.get(opts, :limits, nil)
     script_name = Keyword.get(opts, :script_name, "main.py")
 
-    external_fns =
-      opts
-      |> Keyword.get_lazy(:external_functions, fn -> Map.keys(functions) end)
-      |> Enum.map(&to_string/1)
-      |> Enum.uniq()
-      |> Enum.sort()
-
     input_names = inputs |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
 
     compile_opts = [
       inputs: input_names,
-      external_functions: external_fns,
       script_name: script_name
     ]
 
@@ -159,6 +161,18 @@ defmodule ExMonty.Sandbox do
 
   defp loop(progress, state, acc_output) do
     case progress do
+      {:name_lookup, name, snapshot, output} ->
+        acc_output = acc_output <> output
+        result = resolve_name(name, state)
+
+        case ExMonty.resume(snapshot, result) do
+          {:ok, next_progress} ->
+            loop(next_progress, state, acc_output)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
       {:function_call, %ExMonty.FunctionCall{} = call, snapshot, output} ->
         acc_output = acc_output <> output
         result = dispatch_function(call.name, call.args, call.kwargs, state)
@@ -214,6 +228,33 @@ defmodule ExMonty.Sandbox do
 
       {:complete, value, output} ->
         {:ok, value, acc_output <> output}
+    end
+  end
+
+  defp resolve_name(name, state) do
+    cond do
+      Map.has_key?(state.functions, name) ->
+        {:ok, {:function, name}}
+
+      state.handler != nil and function_exported?(state.handler, :handle_name_lookup, 1) ->
+        try do
+          state.handler.handle_name_lookup(name)
+        rescue
+          e -> {:error, :runtime_error, Exception.message(e)}
+        end
+        |> case do
+          {:ok, _} = ok -> ok
+          :undefined -> :undefined
+          {:error, _, _} = err -> err
+          _ -> :undefined
+        end
+
+      state.handler != nil and function_exported?(state.handler, :handle_function, 3) ->
+        # If the handler has handle_function, assume it can handle any name
+        {:ok, {:function, name}}
+
+      true ->
+        :undefined
     end
   end
 

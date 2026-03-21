@@ -73,20 +73,14 @@ defmodule ExMonty.SandboxTest do
 
     test "basic module handler" do
       {:ok, result, _output} =
-        ExMonty.Sandbox.run("double(21)",
-          handler: TestHandler,
-          external_functions: ["double"]
-        )
+        ExMonty.Sandbox.run("double(21)", handler: TestHandler)
 
       assert result == 42
     end
 
     test "module handler with string return" do
       {:ok, result, _output} =
-        ExMonty.Sandbox.run("greet('World')",
-          handler: TestHandler,
-          external_functions: ["greet"]
-        )
+        ExMonty.Sandbox.run("greet('World')", handler: TestHandler)
 
       assert result == "Hello, World!"
     end

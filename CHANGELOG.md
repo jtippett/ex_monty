@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.0
+
+### Breaking Changes
+
+- **Removed `external_functions` option from `compile/2` and `Sandbox.run/2`.**
+  External functions are now auto-detected at runtime via name lookup. The
+  `:external_functions` option is no longer accepted.
+- **`ExMonty.Native.compile/4` is now `compile/3`** (removed `external_fns` parameter).
+
+### New Features
+
+- **Name lookup progress tag.** When Python code references an undefined name
+  (without calling it), execution pauses with `{:name_lookup, name, snapshot, output}`.
+  Resume with `{:ok, {:function, name}}` to provide a callable, `{:ok, value}` for a
+  constant, or `:undefined` to raise `NameError`.
+- **`MontyObject::Function` type.** A new tagged tuple `{:function, name}` (or
+  `{:function, name, docstring}`) can be returned from name lookups to provide
+  callable function objects to the Python VM.
+- **`handle_name_lookup/1` callback** in `ExMonty.Sandbox` behaviour (optional).
+  Called when the sandbox encounters an undefined name. The sandbox auto-resolves
+  names found in the `:functions` map.
+
+### Upstream Improvements (monty v0.0.8)
+
+- `re` module implementation (regex support).
+- Full Python `math` module (~50 functions).
+- PEP 448 generalised unpacking (`[*a, *b]`, `{**a, **b}`).
+- Tuple comparison operators (`<`, `>`, `<=`, `>=`).
+- Dict view and set/frozenset operators.
+- `str` and `bytes` comparison operators.
+- Augmented assignment on subscript targets (`x[i] += 1`).
+- `max()` kwargs/default support.
+- Bug fixes: stack-depth tracking, loop iterator depth, variable shadowing panic,
+  `os.environ` panic in JS bindings.
+
 ## 0.2.1
 
 - Fix dataclass round-trip: `ExMonty.Dataclass` structs returned from handlers are now decoded back to `MontyObject::Dataclass`, preserving field access (`p.x`), frozen semantics, and method calls.

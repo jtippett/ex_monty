@@ -1,4 +1,4 @@
-use monty::{FutureSnapshot, LimitedTracker, MontyRun, Snapshot};
+use monty::{FunctionCall, LimitedTracker, MontyRun, NameLookup, OsCall, ResolveFutures};
 use rustler::Resource;
 use std::sync::Mutex;
 
@@ -33,21 +33,30 @@ impl RunnerResource {
 #[rustler::resource_impl]
 impl Resource for RunnerResource {}
 
-/// Wrapper around Snapshot<LimitedTracker>.
-/// Uses Mutex<Option<...>> because Snapshot::run consumes self.
+/// Enum wrapping the resumable RunProgress variants that take ExtFunctionResult
+/// or NameLookupResult.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum SnapshotKind {
+    FunctionCall(FunctionCall<LimitedTracker>),
+    OsCall(OsCall<LimitedTracker>),
+    NameLookup(NameLookup<LimitedTracker>),
+}
+
+/// Wrapper around resumable snapshot variants.
+/// Uses Mutex<Option<...>> because resume consumes the snapshot.
 pub struct SnapshotResource {
-    snapshot: Mutex<Option<Snapshot<LimitedTracker>>>,
+    snapshot: Mutex<Option<SnapshotKind>>,
 }
 
 impl SnapshotResource {
-    pub fn new(snapshot: Snapshot<LimitedTracker>) -> Self {
+    pub fn new(snapshot: SnapshotKind) -> Self {
         Self {
             snapshot: Mutex::new(Some(snapshot)),
         }
     }
 
     /// Take the snapshot out, consuming it. Returns None if already taken.
-    pub fn take(&self) -> Option<Snapshot<LimitedTracker>> {
+    pub fn take(&self) -> Option<SnapshotKind> {
         self.snapshot.lock().unwrap().take()
     }
 }
@@ -55,28 +64,28 @@ impl SnapshotResource {
 #[rustler::resource_impl]
 impl Resource for SnapshotResource {}
 
-/// Wrapper around FutureSnapshot<LimitedTracker>.
-/// Uses Mutex<Option<...>> because FutureSnapshot::resume consumes self.
+/// Wrapper around ResolveFutures<LimitedTracker>.
+/// Uses Mutex<Option<...>> because resume consumes the snapshot.
 pub struct FutureSnapshotResource {
-    snapshot: Mutex<Option<FutureSnapshot<LimitedTracker>>>,
+    snapshot: Mutex<Option<ResolveFutures<LimitedTracker>>>,
 }
 
 impl FutureSnapshotResource {
-    pub fn new(snapshot: FutureSnapshot<LimitedTracker>) -> Self {
+    pub fn new(snapshot: ResolveFutures<LimitedTracker>) -> Self {
         Self {
             snapshot: Mutex::new(Some(snapshot)),
         }
     }
 
     /// Take the snapshot out, consuming it. Returns None if already taken.
-    pub fn take(&self) -> Option<FutureSnapshot<LimitedTracker>> {
+    pub fn take(&self) -> Option<ResolveFutures<LimitedTracker>> {
         self.snapshot.lock().unwrap().take()
     }
 
     /// Access the snapshot without consuming it (for pending_call_ids).
     pub fn with<F, R>(&self, f: F) -> Option<R>
     where
-        F: FnOnce(&FutureSnapshot<LimitedTracker>) -> R,
+        F: FnOnce(&ResolveFutures<LimitedTracker>) -> R,
     {
         let guard = self.snapshot.lock().unwrap();
         guard.as_ref().map(f)
