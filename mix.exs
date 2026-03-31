@@ -28,7 +28,8 @@ defmodule ExMonty.MixProject do
 
   defp deps do
     [
-      {:rustler, "~> 0.37"},
+      {:rustler, "~> 0.37", optional: true},
+      {:rustler_precompiled, "~> 0.8"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
@@ -38,7 +39,7 @@ defmodule ExMonty.MixProject do
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
       files:
-        ~w(lib native/ex_monty/Cargo.toml native/ex_monty/Cargo.lock native/ex_monty/src .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
+        ~w(lib native/ex_monty/Cargo.toml native/ex_monty/Cargo.lock native/ex_monty/src checksum-Elixir.ExMonty.Native.exs .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
     ]
   end
 

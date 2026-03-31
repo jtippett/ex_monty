@@ -1,9 +1,21 @@
 defmodule ExMonty.Native do
   @moduledoc false
 
-  use Rustler,
+  @version Mix.Project.config()[:version]
+
+  use RustlerPrecompiled,
     otp_app: :ex_monty,
-    crate: "ex_monty"
+    crate: "ex_monty",
+    base_url: "https://github.com/jtippett/ex_monty/releases/download/v#{@version}",
+    version: @version,
+    targets: ~w(
+      aarch64-apple-darwin
+      x86_64-apple-darwin
+      x86_64-unknown-linux-gnu
+      aarch64-unknown-linux-gnu
+      x86_64-unknown-linux-musl
+    ),
+    force_build: System.get_env("EXMONTY_BUILD") in ["1", "true"]
 
   # Core
   def compile(_code, _script_name, _input_names),
