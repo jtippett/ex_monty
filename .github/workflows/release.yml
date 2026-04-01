@@ -26,7 +26,7 @@ jobs:
             os: ubuntu-24.04-arm
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            use_zigbuild: true
+            use_cross: true
 
     steps:
       - uses: actions/checkout@v4
@@ -43,15 +43,18 @@ jobs:
         with:
           workspaces: native/ex_monty
 
-      - name: Install cargo-zigbuild
-        if: matrix.use_zigbuild
-        run: pip install ziglang cargo-zigbuild
+      - name: Install cross
+        if: matrix.use_cross
+        run: |
+          curl -fsSL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C "$HOME/.cargo/bin"
+          cross --version
 
       - name: Build NIF
         working-directory: native/ex_monty
         run: |
-          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
-            cargo zigbuild --release --target ${{ matrix.target }}
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
           fi
