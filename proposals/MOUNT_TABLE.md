@@ -1,25 +1,37 @@
 # Proposal: `ExMonty.Mount` — host filesystem mounts in the sandbox
 
-**Status:** Draft, revision 3 (after second review pass)
+**Status:** Final draft, revision 4 (ready to implement)
 **Author:** James Tippett
 **Target:** ExMonty v0.4 (post-v0.0.17 update)
 
-> **Revision 3 changes (incorporating second review):**
+> **Revision 4 changes (final review pass):**
+> - `count/1` is **permissive under lease.** Mount count and lightweight
+>   descriptors live in a separate `Mutex<Vec<MountDescriptor>>` alongside
+>   the leased table, so `count/1` works without contending with the
+>   active run. `list/1` still requires the table (it needs live
+>   `write_bytes_used`) and so still errors under lease. (§2, §4, §5.2)
+> - **`:invalid_mode` added to `add_error`** — bad mode atom is an obvious
+>   user-facing failure. (§2)
+> - **`release/1` is explicitly idempotent.** Calling it twice returns
+>   `:ok`. Lease `Drop` after explicit release is a no-op. Implemented
+>   with an `AtomicBool` released flag plus CAS. (§5.2)
+> - **Lease Drop wording softened.** Killed-process release happens "when
+>   the lease resource becomes unreachable to the GC," not
+>   "deterministically when the BEAM process dies." Prompt release is
+>   guaranteed only by `try/after`. (§4)
+> - **Concurrent lease use tolerated** with mutex + idempotent state
+>   transitions. Doesn't assume an opaque term stays in one process. (§5.2)
+>
+> **Revision 3 changes (preserved for context):**
 > - **Explicit run lease.** `Mount.checkout/1` takes the table out for the
->   *entire logical run*; NIFs operate on the lease, never the bare mount.
->   Closes the gap where two `Sandbox.run`s could interleave on the same
->   mount while one was paused in an Elixir callback. (§2, §4)
-> - **`:no_handler` is computed Rust-side.** Elixir dispatch returns a
->   `:no_handler` atom; the Rust loop calls `OsFunction::on_no_handler`
->   itself. No duplication of upstream exception text in Elixir. (§5.1)
-> - **`:mount_in_use` added to `add_error` type and to `list/1`'s contract.**
-> - **Toned-down panic claims.** "Drop guard for unwind safety" rather than
->   promising panic recovery. (§5.1)
-> - **Open questions resolved.** `overlay_bytes` deferred (upstream
->   `OverlayState` doesn't expose a public byte count; tombstones, dirs, lazy
->   refs make accounting non-trivial). Inline mount-spec shorthand deferred
->   (hides the stateful-resource nature; if we want it, do it as
->   `Mount.from_specs/1` not `Sandbox.run(mounts: [...])`). (§7, §8)
+>   entire logical run; NIFs operate on the lease, never the bare mount.
+>   Closes the interleave gap during paused Elixir callbacks. (§2, §4)
+> - **`:no_handler` is computed Rust-side.** Elixir dispatch returns
+>   `:no_handler`; the Rust loop calls `OsFunction::on_no_handler`. (§5.1)
+> - **`:mount_in_use` added to `add_error` type and `list/1`'s contract.**
+> - **Toned-down panic claims.** Drop guard for unwind safety, not panic
+>   recovery. (§5.1)
+> - **`overlay_bytes` and inline shorthand deferred.** (§7)
 >
 > **Revision 2 changes (preserved for context):**
 > - Mounts are a **separate `mounts:` option**, composing with `:os`. (§3)
@@ -121,6 +133,7 @@ defmodule ExMonty.Mount do
   @type add_opts :: [write_bytes_limit: pos_integer()]
   @type add_error ::
           :invalid_virtual_path           # not absolute, contains "..", etc.
+          | :invalid_mode                  # mode atom not in @type mode
           | :host_path_not_found
           | :host_path_not_directory
           | :host_path_canonicalize_failed
@@ -144,15 +157,22 @@ defmodule ExMonty.Mount do
           {:ok, t()} | {:error, add_error()}
   @spec add!(t(), virtual :: String.t(), host :: String.t(), mode(), add_opts()) :: t()
 
+  # Permissive — works whether or not the mount is leased.
+  # Lightweight descriptors are stored on the source resource, separate
+  # from the leased table.
   @spec count(t()) :: non_neg_integer()
 
-  # `list/1` errors if the mount is currently leased to a run; `list!/1` raises.
+  # `list/1` requires the live table (it surfaces `write_bytes_used`);
+  # errors if the mount is currently leased. `list!/1` raises.
   @spec list(t()) :: {:ok, [list_entry()]} | {:error, :mount_in_use}
   @spec list!(t()) :: [list_entry()]
 
   # ── Run lease (advanced API; Sandbox.run handles this internally) ───────
 
   @spec checkout(t()) :: {:ok, lease()} | {:error, :mount_in_use}
+
+  # Idempotent: calling `release/1` on an already-released lease returns
+  # `:ok` and is a no-op.
   @spec release(lease()) :: :ok
 end
 ```
@@ -267,7 +287,7 @@ While a lease is alive against a mount:
 | `Mount.add/5` (same mount)       | `{:error, :mount_in_use}`               |
 | `Mount.list/1` (same mount)      | `{:error, :mount_in_use}`               |
 | `Mount.list!/1` (same mount)     | raises `ExMonty.MountInUseError`        |
-| `Mount.count/1` (same mount)     | also `{:error, :mount_in_use}`? — see §8.1 |
+| `Mount.count/1` (same mount)     | proceeds (reads side-channel descriptors, §5.2) |
 | `Mount.checkout/1` (same mount)  | `{:error, :mount_in_use}` (second run)  |
 | `start_with_mounts(..., lease)`  | proceeds                                |
 | `resume_with_mounts(..., lease)` | proceeds                                |
@@ -278,15 +298,24 @@ visible to subsequent calls.
 
 ### Backup safety: lease Drop guard
 
-If the BEAM process holding a lease dies before calling `release/1`, the
-lease's Rust `Drop` impl puts the table back into the source mount. The
-lease resource is owned by exactly one BEAM process at a time (it's not
-shared across `ResourceArc`s in the user-facing API), so Drop runs
-deterministically when the lease becomes unreachable.
+If a process abandons a lease without calling `release/1`, the Rust
+`Drop` impl on the lease resource puts the table back into the source
+mount when the lease becomes unreachable to the BEAM GC. **Drop is a
+backup, not a substitute for `try/after`:**
 
-This is a backup, not a substitute for `try/after` — `release/1` ensures
-the mount becomes available for the next run *before* the NIF stack
-unwinds, which matters for sequential runs in the same process.
+- Drop runs only when the lease resource is no longer referenced by any
+  process. There is no guarantee about *when* that happens — it depends
+  on GC pressure.
+- `Sandbox.run` therefore calls `release/1` explicitly in an `after`
+  block. That makes the mount available for the *next sequential run*
+  in the same process without waiting for GC.
+- If the BEAM process holding the lease is killed before
+  `Sandbox.run`'s `after` runs, the lease eventually drops and the
+  mount becomes usable again — but a back-to-back retry in another
+  process may race with that drop.
+
+`release/1` is **idempotent** (§5.2), so explicit release followed by
+Drop on the same lease is safe.
 
 ## 5. Implementation outline
 
@@ -402,55 +431,124 @@ Reasons:
 Two Rustler resources: `MountResource` (the durable mount object backing a
 `%Mount{}`) and `MountLease` (the per-run lease backing a `%Mount.Lease{}`).
 
+#### `MountResource`
+
 ```rust
 pub struct MountResource {
-    // The lease takes the inner table out via `Option::take`. While
-    // `table` is `None`, the mount is leased and all read/write ops
-    // against it return `:mount_in_use`.
+    // The live table. `None` while a lease is active.
+    // Access is gated by `take_lock` to serialise checkout/release.
     table: Mutex<Option<MountTable>>,
+
+    // Lightweight, always-available metadata. Mirrors the mounts in the
+    // table but doesn't depend on the table being present. `count/1` and
+    // any non-mutable inspection reads from here without contending with
+    // an active run. `add/5` updates this in lockstep with the table.
+    descriptors: Mutex<Vec<MountDescriptor>>,
 }
 
+struct MountDescriptor {
+    virtual_path: String,
+    host_path: String,
+    mode_label: &'static str,    // "read-only" | "read-write" | "overlay"
+    write_bytes_limit: Option<u64>,
+}
+```
+
+`count/1` locks `descriptors` only — never the table — so it works
+during a lease. `list/1` needs `write_bytes_used` (which lives on the
+`Mount` inside the table), so it locks the table and errors with
+`:mount_in_use` when the table has been moved into a lease.
+
+#### `MountLease`
+
+```rust
 pub struct MountLease {
-    // Owning reference back to the source resource, used by `Drop` to
-    // restore the table even if `release/1` was never called.
+    // Source resource, kept alive for the lease's duration so Drop can
+    // restore the table. Holding a `ResourceArc` prevents the source
+    // `MountResource` from being GC'd while a lease is outstanding.
     source: ResourceArc<MountResource>,
-    // Owned table for the lease's lifetime.
+
+    // The owned table for this lease. `None` after release.
     table: Mutex<Option<MountTable>>,
+
+    // CAS flag so concurrent `release/1` calls (or release + Drop)
+    // serialise to a single put-back. See `release_inner` below.
+    released: AtomicBool,
+}
+```
+
+The `Mutex` on `table` plus the `AtomicBool` on `released` mean a lease
+tolerates concurrent NIF calls or `release/1` calls from different
+processes. We can't assume the opaque `lease()` term stays in one
+process — opaque resources can be sent in messages — so the Rust side
+is built to handle that.
+
+#### Idempotent release path
+
+```rust
+fn release_lease_inner(lease: &MountLease) {
+    // Single CAS winner moves the table back. Subsequent callers see
+    // `released == true` and short-circuit.
+    if lease.released.swap(true, Ordering::AcqRel) {
+        return;  // Already released — no-op.
+    }
+
+    // Take the table out of the lease slot under its mutex.
+    let table = match lease.table.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    };
+
+    if let Some(table) = table {
+        // Restore into the source resource.
+        if let Ok(mut source_slot) = lease.source.table.lock() {
+            *source_slot = Some(table);
+        }
+        // If the source mutex is poisoned we deliberately drop the
+        // table here — better than panicking inside Drop. The mount
+        // resource is then "permanently leased" until GC'd; surfaced
+        // as `:mount_in_use` for any subsequent op.
+    }
+}
+
+#[rustler::nif]
+fn mounts_release(lease: ResourceArc<MountLease>) -> rustler::Atom {
+    release_lease_inner(&lease);
+    atoms::ok()
 }
 
 impl Drop for MountLease {
     fn drop(&mut self) {
-        // Backup safety net: if release/1 wasn't called (e.g. the BEAM
-        // process holding the lease died), put the table back into the
-        // source resource so it can be used again.
-        if let Ok(mut lease_slot) = self.table.lock() {
-            if let Some(table) = lease_slot.take() {
-                if let Ok(mut source_slot) = self.source.table.lock() {
-                    *source_slot = Some(table);
-                }
-            }
-        }
+        // Same path as explicit release; the CAS handles double-release
+        // and "release then Drop" cases identically.
+        release_lease_inner(self);
     }
 }
 ```
 
-Reasons for the whole-table design (rather than per-mount
-`Arc<Mutex<Option<Mount>>>` slots):
+This shape closes three concrete failure modes:
+- `release/1` called twice → second call sees `released == true` and
+  returns `:ok` immediately.
+- `release/1` followed by `Drop` (the `try/after` + GC path) → Drop is
+  a no-op because the CAS already flipped.
+- Two processes holding the lease term and both calling `release/1`
+  concurrently → only one wins the CAS and moves the table; the other
+  returns `:ok` without touching state.
+
+#### Why whole-table, not per-mount slots
+
+(Unchanged from revision 2/3.)
 
 - Upstream sorts mounts longest-prefix-first inside the table; per-slot
   put-back has to preserve order or rebuild the sort. Whole-table
   take/put-back avoids the question.
-- Concurrent `add/5` versus a running sandbox needs synchronisation either
-  way. One mutex per resource is simpler than reasoning about per-slot
-  lock ordering.
+- Concurrent `add/5` versus a running sandbox needs synchronisation
+  either way. One mutex per resource is simpler than reasoning about
+  per-slot lock ordering.
 - Upstream's `take_shared_mounts` API exists because monty-python's
-  `MountDir` objects can be passed across multiple concurrent `Monty.run`
-  calls. We don't have that fan-out — one `Mount` resource is one mount
-  table — so the simpler whole-table model fits.
-
-The `MountLease` keeping a `ResourceArc<MountResource>` ensures that as
-long as a lease is alive, the source `Mount` resource cannot be GC'd
-out from under it.
+  `MountDir` objects can be passed across multiple concurrent
+  `Monty.run` calls. We don't have that fan-out — one `Mount` resource
+  is one mount table.
 
 ### 5.3 Elixir surface changes
 
@@ -524,6 +622,8 @@ out from under it.
 - `Mount.add/5` against a leased mount returns `{:error, :mount_in_use}`.
 - `Mount.list/1` against a leased mount returns `{:error, :mount_in_use}`.
 - `Mount.list!/1` against a leased mount raises `ExMonty.MountInUseError`.
+- `Mount.count/1` against a leased mount **succeeds** (descriptor
+  side-channel) and returns the same count as before the lease.
 - After `Mount.release/1`, the mount is fully usable again — `add`, `list`,
   another `checkout` all succeed.
 - After a `Sandbox.run` succeeds, the mount is released even though the
@@ -533,9 +633,18 @@ out from under it.
 - An interleave attempt during a paused callback errors cleanly: in run A,
   `start_with_mounts` returns a `function_call` progress; before the handler
   resumes, run B's `Mount.checkout/1` returns `{:error, :mount_in_use}`.
-- Lease Drop fallback: if the BEAM process holding a lease exits abruptly
-  (process kill mid-run), the lease's Drop puts the table back. (Test via
-  spawned linked process + `Process.exit/2`.)
+- **Idempotency:** `Mount.release/1` on an already-released lease returns
+  `:ok` and is a no-op; subsequent `add/5` against the source mount
+  succeeds.
+- **Concurrent release:** two processes holding the same lease term
+  calling `release/1` simultaneously both observe `:ok`, only one
+  effects the put-back, and the source mount ends up in a usable state.
+- **Drop GC fallback:** drop all references to a lease without calling
+  `release/1`; after a forced GC, the mount is usable again. (Use
+  `:erlang.garbage_collect/0` to make the test deterministic.)
+- **Process death:** spawn a linked process that takes a lease and
+  exits without releasing; verify the mount becomes usable once the
+  lease term is unreachable.
 
 **Composition with `:os`:**
 - Mounts + `getenv` function-map handler: `getenv` works, mount paths handled.
@@ -586,35 +695,31 @@ Revisit only with concrete user demand:
    `ExMonty.Mount.from_specs/1` returning a real `%Mount{}` rather than
    inlining at the `Sandbox.run` boundary.
 
-## 8. Open questions for reviewers
+## 8. Open questions
 
-Both revision-2 questions resolved (`overlay_bytes` and inline shorthand
-both deferred to §7). One small one remaining:
+All resolved through the review cycle. Recorded for the implementation
+plan:
 
-### 8.1 Should `Mount.count/1` error under lease?
-
-`count/1` returns the number of mounts. It doesn't read mutable state of
-the table itself — number of mounts is fixed at the point the lease was
-taken (since `add/5` errors during a lease).
-
-Two options:
-
-- **Strict**: `count/1` returns `{:error, :mount_in_use}` like `list/1`,
-  for consistency. Forces all mount inspection through the same gate.
-- **Permissive**: `count/1` returns the count, since it's stable for the
-  lease's duration. Makes "how many mounts did I configure" trivially
-  observable from monitoring code without needing to coordinate with runs.
-
-I'd say **permissive**, exposed as a fast read that doesn't lock the
-underlying table — but flagging because §4 currently lists it as
-`:mount_in_use`-on-lease for consistency. Push either way.
+- **`count/1` is permissive** (works under lease via the descriptor
+  side-channel in §5.2). Resolved revision 4.
+- **`list/1` errors under lease** (it surfaces live `write_bytes_used`).
+  Resolved revision 3.
+- **`overlay_bytes` field on `list/1` entries**: deferred (§7).
+- **Inline mount-spec shorthand**: deferred (§7).
+- **`mounts:` as separate Sandbox option** (vs. mutually-exclusive `:os`):
+  resolved revision 2 — separate option.
+- **`:no_handler` round-trip Elixir → Rust**: resolved revision 3.
+- **Idempotent `release/1` and concurrent-tolerant lease**: resolved
+  revision 4.
 
 ## 9. Effort estimate
 
-Roughly 2.5–3.5 days for a careful implementation:
+Roughly 3–4 days for a careful implementation:
 
-- 0.5 day Rust resource design (`MountResource` + `MountLease`) and
-  `mounts_*` NIFs including `checkout` / `release` with Drop-guard backup.
+- 0.75 day Rust resource design (`MountResource` with descriptor
+  side-channel, `MountLease` with `AtomicBool` + `Mutex`) and the
+  `mounts_*` NIFs including idempotent, concurrent-tolerant
+  `checkout` / `release`.
 - 1 day mount-aware `start_with_mounts` / `resume_with_mounts` loop
   including the lease-borrow guard, `:no_handler` round-trip, and the
   upstream `drive_run_progress_through_os_calls` integration.
@@ -624,7 +729,8 @@ Roughly 2.5–3.5 days for a careful implementation:
   - 0.5 day security tests (path escape, symlink escape, cross-mount
     rename, invalid path).
   - 0.5 day lease semantics tests (concurrent checkout, list/add under
-    lease, post-error reuse, Drop fallback via process kill).
+    lease, post-error reuse, idempotent release, double-release,
+    concurrent-process release, GC-driven Drop fallback).
 - 0.5 day docs, examples, CHANGELOG, README.
 
 ## 10. References
