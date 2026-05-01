@@ -1,5 +1,6 @@
 mod error;
 mod interactive;
+mod mounts;
 mod resources;
 mod serialization;
 mod types;

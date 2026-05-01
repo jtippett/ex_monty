@@ -36,4 +36,15 @@ defmodule ExMonty.Native do
   def load_snapshot(_binary), do: :erlang.nif_error(:nif_not_loaded)
   def dump_future_snapshot(_futures), do: :erlang.nif_error(:nif_not_loaded)
   def load_future_snapshot(_binary), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Mounts
+  def mounts_new, do: :erlang.nif_error(:nif_not_loaded)
+  def mounts_count(_ref), do: :erlang.nif_error(:nif_not_loaded)
+  def mounts_list(_ref), do: :erlang.nif_error(:nif_not_loaded)
+
+  def mounts_add(_ref, _virtual, _host, _mode, _write_bytes_limit),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def mounts_checkout(_ref), do: :erlang.nif_error(:nif_not_loaded)
+  def mounts_release(_lease_ref), do: :erlang.nif_error(:nif_not_loaded)
 end
