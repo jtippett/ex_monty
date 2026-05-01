@@ -1,8 +1,27 @@
 # Proposal: `ExMonty.Mount` — host filesystem mounts in the sandbox
 
-**Status:** Draft, seeking review
+**Status:** Draft, revision 2 (after first review pass)
 **Author:** James Tippett
 **Target:** ExMonty v0.4 (post-v0.0.17 update)
+
+> **Revision 2 changes (incorporating reviewer feedback):**
+> - Mounts are now a **separate `mounts:` option**, composing with `:os`, not
+>   mutually exclusive with it. (§3)
+> - **Mount-aware loop happens in Rust** via a new NIF mirroring upstream's
+>   `drive_run_progress_through_os_calls`. Existing `start`/`resume` snapshots
+>   stay mount-free. (§5.1)
+> - Overlay state and `write_bytes_used` are **cumulative on the mount, not
+>   per-run.** Users discard by creating a fresh mount. (§4)
+> - Resource design switched from per-mount `Arc<Mutex<Option<Mount>>>` slots
+>   to a whole-table `Mutex<Option<MountTable>>`. (§5.2)
+> - `add/5` returns `{:ok, t} | {:error, reason}`; `add!/5` raises for
+>   pipe-friendly use. (§2)
+> - Unhandled FS calls fall through to `OsFunction::on_no_handler`
+>   (`PermissionError` on FS, `RuntimeError` on non-FS) instead of ExMonty's
+>   generic `:os_error`. (§5.1)
+> - Test list expanded to cover unmounted-path denial, fallback composition,
+>   overlay persistence, cumulative limits, add-while-in-use, post-error
+>   reuse, invalid paths, and cross-mount rename. (§5.4)
 
 ## Problem
 
@@ -23,25 +42,38 @@ Concrete examples:
 - *"Run user-supplied data scripts that may read CSVs from `/var/lib/myapp/data`,
   but must not see anything else on disk."* (read-only mount)
 - *"Let the sandbox scribble freely, but discard everything when the run ends."*
-  (overlay mount)
-- *"Sandbox can write outputs to `/var/lib/myapp/output`, but is rate-limited to
-  10 MB per run."* (read-write mount with write-bytes limit)
+  (overlay mount + discard mount object after run)
+- *"Sandbox can write outputs to `/var/lib/myapp/output`, capped at 10 MB
+  total across runs against this mount object."* (read-write mount with
+  `write_bytes_limit`)
 
 Upstream monty has shipped a complete sandboxed-mount implementation (PR #305
 in v0.0.13, fixes through v0.0.17). It enforces path canonicalisation,
 boundary checks, and symlink-escape detection. We just haven't wired it up.
 
-## Proposed API
+## 2. Proposed API
+
+```elixir
+{:ok, mounts} = ExMonty.Mount.new()
+{:ok, mounts} = ExMonty.Mount.add(mounts, "/data",   "/var/lib/myapp/data",   :read_only)
+{:ok, mounts} = ExMonty.Mount.add(mounts, "/scratch","/tmp/sandbox-scratch",  :overlay)
+{:ok, mounts} = ExMonty.Mount.add(mounts, "/output", "/var/lib/myapp/output", :read_write,
+                  write_bytes_limit: 10_000_000)
+
+ExMonty.Sandbox.run(code, mounts: mounts, os: %{getenv: &my_getenv/2})
+```
+
+Or pipe-friendly with `add!/5` (raises on error):
 
 ```elixir
 mounts =
-  ExMonty.Mount.new()
-  |> ExMonty.Mount.add("/data", "/var/lib/myapp/data", :read_only)
-  |> ExMonty.Mount.add("/scratch", "/tmp/sandbox-scratch", :overlay)
-  |> ExMonty.Mount.add("/output", "/var/lib/myapp/output", :read_write,
+  ExMonty.Mount.new!()
+  |> ExMonty.Mount.add!("/data",    "/var/lib/myapp/data",    :read_only)
+  |> ExMonty.Mount.add!("/scratch", "/tmp/sandbox-scratch",   :overlay)
+  |> ExMonty.Mount.add!("/output",  "/var/lib/myapp/output",  :read_write,
        write_bytes_limit: 10_000_000)
 
-ExMonty.Sandbox.run(code, os: mounts)
+ExMonty.Sandbox.run(code, mounts: mounts)
 ```
 
 From the Python side:
@@ -57,6 +89,9 @@ Path("/scratch/intermediate.json").write_text("...")
 
 # Writes hit /var/lib/myapp/output/results.csv on the host
 Path("/output/results.csv").write_text(processed)
+
+# Path that doesn't match any mount → PermissionError
+Path("/etc/passwd").read_text()
 ```
 
 ### Mount modes
@@ -64,7 +99,7 @@ Path("/output/results.csv").write_text(processed)
 | Atom         | Behaviour                                                           |
 |--------------|---------------------------------------------------------------------|
 | `:read_only` | Reads passthrough to host. Writes raise `PermissionError`.          |
-| `:read_write`| Full passthrough. Writes hit the real disk. **Footgun — see §6.4.** |
+| `:read_write`| Full passthrough. Writes hit the real disk. **Footgun — see §6.**   |
 | `:overlay`   | Reads fall through to host. Writes captured in-memory; host is untouched. Deletions create tombstones that hide real files for subsequent reads. |
 
 ### Module surface
@@ -75,200 +110,359 @@ defmodule ExMonty.Mount do
 
   @type mode :: :read_only | :read_write | :overlay
   @type add_opts :: [write_bytes_limit: pos_integer()]
+  @type add_error ::
+          :invalid_virtual_path           # not absolute, contains "..", etc.
+          | :host_path_not_found
+          | :host_path_not_directory
+          | :host_path_canonicalize_failed
+          | {:already_mounted, virtual :: String.t()}
 
-  @spec new() :: t()
-  @spec add(t(), virtual :: String.t(), host :: String.t(), mode(), add_opts()) :: t()
+  @spec new() :: {:ok, t()} | {:error, term()}
+  @spec new!() :: t()
+
+  @spec add(t(), virtual :: String.t(), host :: String.t(), mode(), add_opts()) ::
+          {:ok, t()} | {:error, add_error()}
+  @spec add!(t(), virtual :: String.t(), host :: String.t(), mode(), add_opts()) :: t()
+
   @spec count(t()) :: non_neg_integer()
-  @spec list(t()) :: [%{virtual: String.t(), host: String.t(), mode: mode()}]
+  @spec list(t()) :: [%{
+          virtual: String.t(),
+          host: String.t(),
+          mode: mode(),
+          write_bytes_used: non_neg_integer(),
+          write_bytes_limit: pos_integer() | :unlimited
+        }]
 end
 ```
 
-`add/5` returns the same `t()`; the underlying mount table is mutated in place
-(it's a Rustler resource). Returning `t()` keeps the pipe-friendly API.
+`add/5` and `add!/5` both mutate the underlying resource and return the same
+`t()` (resource ref unchanged). The `{:ok, t}` wrapping makes failure modes
+explicit while still letting users pipe with `add!/5`.
 
-## Composition with existing `:os` options
+## 3. Composition with `:os`
 
-The `:os` option already accepts an `ExMonty.PseudoFS{}` struct or a function
-map. We add `ExMonty.Mount{}` as a third mutually-exclusive shape.
+`mounts:` is a **new, separate option** to `Sandbox.run`. It composes with
+existing `:os` shapes:
 
-| `:os` value                      | Behaviour                                  |
-|----------------------------------|--------------------------------------------|
-| `%ExMonty.PseudoFS{}`            | (unchanged) in-memory virtual FS           |
-| `%{atom => fn}`                  | (unchanged) per-function handler map       |
-| **`%ExMonty.Mount{}`** *(new)*   | host directory mounts                      |
+| Option combination                              | Behaviour                                              |
+|-------------------------------------------------|--------------------------------------------------------|
+| `mounts: mounts`                                | mount-only; unmounted paths get `PermissionError`     |
+| `mounts: mounts, os: %{...}` (function map)     | mounts first, fallback to function map for unmounted  |
+| `mounts: mounts, os: pseudo_fs`                 | mounts first, fallback to PseudoFS for unmounted (see §3.1) |
+| `mounts: mounts, handler: MyHandler`            | mounts first, fallback to `MyHandler.handle_os/3`     |
+| `os: ...` (no mounts)                           | (unchanged) existing behaviour                         |
 
-**Mutually exclusive in v1.** No combining `:mounts` with `:pseudo_fs` or with a
-function map. Picked one model after weighing two alternatives:
+Order of resolution for an OS call:
+1. If filesystem op AND path matches a mount → mount handles it.
+2. If filesystem op AND no mount matches → fallback (`:os` map / PseudoFS /
+   handler module).
+3. If non-filesystem op (e.g. `:getenv`, `:date_today`) → fallback only.
+4. No mount AND no fallback → `OsFunction::on_no_handler` —
+   `PermissionError` for FS ops, `RuntimeError` for non-FS ops.
 
-- *Composition list* (`os: [mounts, pseudo_fs, getenv_handler]`, first match
-  wins) — flexible but invites edge cases ("what does `[a, b, a]` mean?").
-- *Tagged map* (`os: %{mounts: ..., fallback: %{...}}`) — explicit but adds a
-  shape every doc/spec has to handle.
+### 3.1 Mounts + PseudoFS
 
-Mutual exclusion is the smallest change. We can revisit composition once we
-have user demand for "mounts + a `getenv` handler in the same run." See §6.5.
+Allowed but flagged in docs as unusual. Mounts handle real-host paths;
+PseudoFS handles purely virtual paths. If a path matches both a mount prefix
+and a PseudoFS file, the mount wins (rule 1). This means PseudoFS effectively
+covers paths that don't fall under any mount. Document with an example.
 
-## Lifecycle semantics
+### 3.2 Why composition won the call
 
-A `Mount` is **stateful** — particularly `:overlay`, where writes from one run
-must be visible to the next. The Elixir struct holds a Rustler resource that
-owns `Arc<Mutex<Option<Mount>>>` slots, mirroring upstream's
-`take_shared_mounts` / `put_back_shared_mounts` pattern.
+Reviewer point: mutual exclusion blocks common cases like
+"mounts + custom `getenv`" or "mounts + `datetime_now` clock handler." Those
+non-FS handlers don't conflict with mount semantics — they're orthogonal —
+and forcing the user to write a handler module that delegates to mounts is
+not actually possible since the mount-table internals are private. Separate
+options + clear ordering is simpler than tagged-map composition (`os: %{mounts: ..., fallback: ...}`)
+and easier to document.
 
-**Per-run flow:**
-1. `Sandbox.run` borrows each mount's slot via `Mutex::lock` + `Option::take`.
-2. Mounts are assembled into a `MountTable` and used for the run.
-3. After the run completes (success or error), mounts are put back into their
-   slots.
-4. The `%ExMonty.Mount{}` struct passed in is now safe to reuse.
+## 4. Lifecycle semantics
 
-**Concurrent use surfaces a clear error.** If two runs try to take the same
-mount, the second gets:
+A `Mount` is **stateful**. Two pieces of state persist on the mount object
+across runs:
+
+1. **Overlay storage** (`:overlay` mode only). Writes accumulate in-memory on
+   the mount. A subsequent run against the same mount object sees those
+   writes.
+2. **`write_bytes_used` counter** (any mode with a `write_bytes_limit`). The
+   counter is **cumulative across runs against this mount object** — it does
+   not reset between runs. When `write_bytes_used + new_write_size >
+   write_bytes_limit`, the write raises `OSError`.
+
+> **To discard overlay state or reset the write counter, create a fresh mount.**
+> There is no `reset/1` in v1. Mount construction is cheap.
+
+### Per-run flow (Rust side)
+
+The new `Sandbox.run_with_mounts` path:
+
+1. NIF `mounts_run` takes ownership of the `MountTable` (via
+   `Mutex::lock` + `Option::take` on the resource).
+2. Drives the os-call loop in Rust (see §5.1). Mount-handled FS ops never
+   leave Rust.
+3. On every exit path (success, mount error, propagated MontyException,
+   panic recovery, NIF unwinding), the `MountTable` is **put back** into the
+   resource slot.
+4. After the NIF returns, the `%ExMonty.Mount{}` struct is safe to reuse for
+   another run.
+
+### Concurrent use surfaces a clear error
+
+If two runs try to use the same mount concurrently, the second gets:
 
 ```elixir
 {:error, %ExMonty.Exception{
   type: :runtime_error,
-  message: "mount '/data' is already in use by another run"
+  message: "mount table is already in use by another run"
 }}
 ```
 
 Users who want concurrent reads against the same host directory should create
-two `Mount` objects pointing at the same host path — they're cheap.
+two separate `Mount` objects pointing at the same host path.
 
-## Implementation outline
+### Adding mounts while a run is in progress
 
-### Rust side (`native/ex_monty/src/`)
+`Mount.add/5` against a mount currently in use by a run returns
+`{:error, :mount_in_use}`. Users should construct mounts before kicking off
+runs.
 
-New module `mounts.rs`:
+## 5. Implementation outline
+
+### 5.1 Mount-aware loop in Rust
+
+Today's flow (without mounts):
+
+```
+Elixir          Rust           VM
+  start  ──>  start NIF  ──>  start
+                              ↓
+                              os_call?
+                              ↓
+                <── OsCall ── progress
+  resume  ──>  resume NIF ──> resume
+  ...           (loop back)
+```
+
+Today the `Sandbox.run/2` loop in `lib/ex_monty/sandbox.ex` (around line 172)
+calls `ExMonty.start/3` then loops on `ExMonty.resume/2`. **Snapshots
+currently carry no mount context.** We do *not* want to thread a mount-table
+reference through every snapshot.
+
+New flow with mounts:
+
+```
+Elixir              Rust                     VM
+  start_with_mounts ──> start_with_mounts NIF ──> start
+                          ↓
+                          take MountTable
+                          ↓
+                          loop:
+                            os_call?
+                            ↓ yes
+                            mount handles?  ──> resume in Rust ──> loop
+                            ↓ no                   ↑
+                            non-FS or unmounted ───┘
+                          ↓
+                          put back MountTable
+                          ↓
+              <── progress (FunctionCall / NameLookup / Complete / unmounted OsCall)
+```
+
+Two new NIFs:
+
+```rust
+#[rustler::nif(schedule = "DirtyCpu")]
+fn start_with_mounts<'a>(
+    env: Env<'a>,
+    runner: ResourceArc<RunnerResource>,
+    inputs: Vec<(String, Term<'a>)>,
+    limits: Term<'a>,
+    mounts: ResourceArc<MountResource>,
+) -> NifResult<Term<'a>>;
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn resume_with_mounts<'a>(
+    env: Env<'a>,
+    snapshot: ResourceArc<SnapshotResource>,
+    result: Term<'a>,
+    mounts: ResourceArc<MountResource>,
+) -> NifResult<Term<'a>>;
+```
+
+Internally these mirror upstream's `drive_run_progress_through_os_calls` in
+`crates/monty-python/src/monty_cls.rs:2077`:
+
+- Take the `MountTable` once on entry.
+- Loop while `RunProgress::OsCall(call)` arrives:
+  - Ask `MountTable::handle_os_call`.
+  - `Some(Ok(obj))` → call `call.resume(Return(obj), print)` in-Rust, continue.
+  - `Some(Err(mount_err))` → `call.resume(Error(mount_err.into_exception()), print)`,
+    continue.
+  - `None` (non-FS or unmounted path) → break out, return the OsCall to
+    Elixir for fallback dispatch.
+- On any other progress variant (`FunctionCall`, `NameLookup`,
+  `ResolveFutures`, `Complete`) → break out, return to Elixir.
+- **Always** put the `MountTable` back, including on Rust panics. Wrap the
+  loop body in a guard struct whose `Drop` impl restores the slot.
+
+Snapshots returned to Elixir for non-mount progress carry no mount
+reference. The Elixir-side `Sandbox.run` loop calls `resume_with_mounts/3`
+(passing `mounts` again) to re-enter the Rust loop. The mount table is
+re-borrowed each time.
+
+Unhandled os calls (no mount + no fallback) emit `OsFunction::on_no_handler`
+as the result, which gives `PermissionError` for FS ops and `RuntimeError`
+for non-FS ops. Replaces the current generic `:os_error`.
+
+### 5.2 Resource design
+
+Single whole-table `Mutex<Option<MountTable>>` rather than per-mount slots:
 
 ```rust
 pub struct MountResource {
-    slots: Vec<Arc<Mutex<Option<Mount>>>>,
-    // Metadata for `list/1` and error messages
-    descriptors: Vec<MountDescriptor>,
+    table: Mutex<Option<MountTable>>,
 }
-
-#[rustler::resource_impl]
-impl Resource for MountResource {}
-
-#[rustler::nif]
-fn mounts_new() -> ResourceArc<MountResource> { ... }
-
-#[rustler::nif]
-fn mounts_add(
-    mounts: ResourceArc<MountResource>,
-    virtual_path: String,
-    host_path: String,
-    mode: Atom,
-    write_bytes_limit: Option<u64>,
-) -> NifResult<ResourceArc<MountResource>> { ... }
-
-#[rustler::nif]
-fn mounts_list(mounts: ResourceArc<MountResource>) -> Vec<MountInfo> { ... }
 ```
 
-Dispatch — the loop in `interactive.rs` becomes mount-aware. When
-`RunProgress::OsCall` arrives:
+Reasons:
+- Upstream sorts mounts longest-prefix-first inside the table; per-slot
+  put-back has to preserve order or rebuild the sort. Whole-table
+  take/put-back avoids the question.
+- Concurrent `add/5` versus a running sandbox needs synchronisation either
+  way. One mutex is simpler than reasoning about per-slot lock ordering.
+- Upstream's `take_shared_mounts` API exists for the case where mounts
+  outlive a single `MontyRun` and might be used in multiple concurrent
+  monty-python objects. We don't need that fan-out — one `Mount` resource
+  is one mount table.
 
-```rust
-if let Some(mount_table) = &mut state.mounts {
-    if let Some(result) = mount_table.handle_os_call(call.function, &call.args, &call.kwargs) {
-        // Mount handled it — resume immediately with the result
-        return resume_with(call, result);
-    }
-}
-// No mount matched, or non-FS op — fall through to Elixir
-return os_call_to_elixir(call);
-```
+### 5.3 Elixir surface changes
 
-This means mount-handled FS ops never pay the Rust↔Elixir round-trip cost.
+- `lib/ex_monty/mount.ex` — new module, ~120 lines including specs and
+  moduledoc.
+- `lib/ex_monty/native.ex` — declarations for new NIFs:
+  - `mounts_new/0`
+  - `mounts_add/5`
+  - `mounts_list/1`
+  - `mounts_count/1`
+  - `start_with_mounts/4`
+  - `resume_with_mounts/3`
+- `lib/ex_monty/sandbox.ex`:
+  - `run/2` accepts new `:mounts` option (default `nil`).
+  - When `:mounts` present, dispatch loop calls `start_with_mounts` /
+    `resume_with_mounts` and uses `OsFunction::on_no_handler` semantics for
+    unhandled.
+  - When `:mounts` absent, behaviour is unchanged.
 
-### Elixir side (`lib/ex_monty/`)
+### 5.4 Tests
 
-- `lib/ex_monty/mount.ex` — new module, ~80 lines.
-- `lib/ex_monty/sandbox.ex` — `dispatch_os/4` learns to recognize
-  `%ExMonty.Mount{}`, `normalize_os_handlers/1` accepts it, mode atoms added
-  to type docs.
-- `lib/ex_monty/native.ex` — three new NIF declarations.
+`test/ex_monty/mount_test.exs`:
 
-### Tests
+**Construction & validation:**
+- `new/0` returns `{:ok, t}`; `new!/0` returns `t`.
+- `add/5` rejects invalid virtual paths (relative, `".."`, empty).
+- `add/5` rejects nonexistent host paths.
+- `add/5` rejects host paths that aren't directories.
+- `add/5` returns `{:error, :mount_in_use}` if the resource is currently
+  in use by a run.
+- `add!/5` raises on each error case above.
 
-- `test/ex_monty/mount_test.exs` — read-only blocks writes; read-write hits
-  disk; overlay isolates writes; concurrent-use error; longest-prefix routing
-  (`/data/users` matches `/data/users` mount before `/data` mount); symlink
-  escape blocked; per-mount write-bytes limit enforced.
-- `test/ex_monty/sandbox_test.exs` — extend with mount-as-os-option dispatch,
-  conflict with PseudoFS / function-map, propagation of mount errors.
+**Mode behaviour:**
+- `:read_only` — reads succeed, writes raise `PermissionError`.
+- `:read_write` — reads and writes both hit the host.
+- `:overlay` — reads fall through, writes captured, host untouched, tombstones
+  hide deleted host files.
 
-## Read-write mode safety
+**Routing:**
+- Longest-prefix-first wins (`/data/users` mount preferred over `/data`).
+- Cross-mount `Path.rename` requires both endpoints to resolve to the same
+  mount.
+- Unmounted path raises `PermissionError` (not generic `os_error`).
+
+**Security:**
+- Symlink escape blocked (`/data/link → /etc/passwd`).
+- `..` segments cannot escape the mount root.
+- Absolute symlinks pointing outside the host root are blocked.
+
+**Lifecycle & limits:**
+- Cumulative `write_bytes_used` across multiple runs against the same mount
+  object.
+- `write_bytes_limit` enforced cumulatively, not per run.
+- Overlay writes from run A are visible in run B against the same mount.
+- Fresh mount object discards overlay state from a previous mount.
+- Mount object is reusable after a Python exception in a previous run.
+- `:mount_in_use` error if a second run tries to use a mount mid-run.
+
+**Composition with `:os`:**
+- Mounts + `getenv` function-map handler: `getenv` works, mount paths handled.
+- Mounts + `datetime_now` handler: `datetime_now` works, mount paths handled.
+- Mounts + handler module: `handle_os/3` invoked for unmounted paths only.
+- Mounts + PseudoFS: mount paths win over PseudoFS for overlapping prefixes.
+
+Plus updates to `test/ex_monty/sandbox_test.exs` for the new option and its
+interaction with existing options.
+
+## 6. Read-write mode safety
 
 `:read_write` lets sandbox code modify real host files. That's a real footgun.
 
 **Decision: documented, unguarded.** Same posture as `File.write/2` in core
-Elixir — if someone explicitly opts into `:read_write`, they meant it. Every
-example in the docs uses `:read_only` or `:overlay`; `:read_write` only
-appears with a "use with caution" callout.
+Elixir. Every example in the docs uses `:read_only` or `:overlay`;
+`:read_write` only appears with a "use with caution" callout.
 
-Considered but rejected: renaming to `:dangerous_read_write` to force
-visibility. ExMonty is positioned for executing **untrusted Python** — a user
-wiring up `:read_write` has already accepted that posture. Renaming the atom
-would be theatre, not safety.
+Considered but rejected: renaming to `:dangerous_read_write`. ExMonty is
+positioned for executing **untrusted Python** — a user wiring up
+`:read_write` has already accepted that posture. Renaming would be theatre,
+not safety.
 
-## Out of scope for v1
+## 7. Out of scope for v1
 
-These should be revisited only with concrete user demand:
+Revisit only with concrete user demand:
 
-1. **Mounts + PseudoFS in the same run.** Fine in theory but invites questions
-   about precedence for paths like `/data/foo` if both layers claim it.
-2. **Mounts + function-map non-FS handlers.** A user might want
-   `os: %{mounts: ..., fallback: %{getenv: ...}}` to combine FS mounts with a
-   custom `getenv`. This is the natural extension if anyone asks. Until then,
-   you can write a handler module that delegates to mounts.
-3. **Persistent overlay state.** Today's overlay is in-memory only. Saving and
-   restoring overlay state across BEAM restarts is tractable but separate.
-4. **Per-mount resource limits beyond `write_bytes_limit`.** Read-bytes limit,
-   inode count, etc. — upstream doesn't expose them today.
-5. **Network-style mounts** (HTTP-backed FS, S3, etc.) — not in upstream
+1. **Persistent overlay state across BEAM restarts.** Today's overlay is
+   in-memory only. Saving and restoring overlay state (postcard? sqlite?)
+   is tractable but separate.
+2. **Per-mount resource limits beyond `write_bytes_limit`.** Read-bytes
+   limit, inode count, etc. — upstream doesn't expose them today.
+3. **Mount reset.** No `Mount.reset/1` to clear overlay state in place.
+   Construct a fresh mount instead.
+4. **Network-style mounts** (HTTP-backed FS, S3, etc.) — not in upstream
    monty's scope.
+5. **Tagged-map composition** (`os: %{mounts: ..., fallback: ...}`) — the
+   separate `mounts:` option in §3 covers the same use case more cleanly.
 
-## Open questions for reviewers
+## 8. Open questions for reviewers
 
-1. **API: `add/5` returns `t()`.** Pipe-friendly but slightly misleading since
-   the resource is mutated in place. Alternatives: `add/5` returns `:ok` and
-   we drop the chaining, or accept a list of mount specs in `new/1`. Pipe
-   chaining feels more idiomatic, but I want to surface the trade-off.
+Most of revision 1's open questions resolved by feedback. Two remain:
 
-2. **Mode atoms vs. tagged tuples.** `:overlay` is straightforward, but what
-   about per-mount overlay configuration (max overlay size, persist-on-disk
-   later)? Should the API be `{:overlay, opts}` from day one to leave room?
-   I'd say no — YAGNI — but flagging.
+1. **`mounts_list/1` field shape.** I now include `write_bytes_used` and
+   `write_bytes_limit` (per reviewer note about exposing cumulative state).
+   Should it also include a per-mount `overlay_bytes` for `:overlay` mounts?
+   Upstream tracks this; it'd help users monitor "how much memory am I
+   accumulating." Cheap to add now.
 
-3. **Concurrent-run error.** Currently surfaces as a generic
-   `runtime_error`. Should this be a distinct exception type
-   (`:mount_conflict_error`)? Cheap to add now, painful to retrofit.
+2. **Should `Sandbox.run` accept a `mounts:` shorthand for an inline list?**
+   I.e. `mounts: [{"/data", "/host/path", :read_only}, ...]` constructed
+   on-the-fly. Convenient for one-shot runs, but loses cumulative overlay
+   state semantics (every run gets a fresh mount). Could be added later as
+   a `:mounts_inline` option without changing today's design. Defer?
 
-4. **`list/1` field shape.** I have `%{virtual:, host:, mode:}` — should it
-   also include `write_bytes_used / write_bytes_limit` for monitoring?
+## 9. Effort estimate
 
-5. **Should `Sandbox.run` accept `mounts:` as a separate option?** I.e.
-   `Sandbox.run(code, mounts: ..., os: pseudo_fs)`. Lets you compose mounts +
-   PseudoFS in v1 after all, with mounts checked first. This is a real
-   alternative to the mutual-exclusion stance in §3 — worth a hard look.
+Roughly 2–3 days for a careful implementation:
 
-## Effort estimate
+- 0.5 day Rust resource design and `mounts_*` NIFs.
+- 1 day mount-aware `start_with_mounts` / `resume_with_mounts` loop including
+  the put-back guard and panic safety.
+- 0.5 day Elixir `Mount` module + `Sandbox` integration.
+- 1 day tests, especially the security tests (path escape, symlink escape).
+- 0.5 day docs, examples, CHANGELOG, README.
 
-Roughly 1–2 days for a careful implementation:
+## 10. References
 
-- 0.5 day Rust side (resource + NIFs + dispatch wiring)
-- 0.5 day Elixir side (`Mount` module + `Sandbox` integration)
-- 0.5 day tests, including security tests (path escape, symlink escape)
-- 0.5 day docs, examples, CHANGELOG
-
-Multiply by 1.5 if §5 (composition with PseudoFS) lands in v1.
-
-## References
-
-- Upstream monty `fs::MountTable`: `crates/monty/src/fs/mount_table.rs`
-- Upstream Python bindings (showing one wiring approach):
-  `crates/monty-python/src/monty_cls.rs` (commit `6692c0b`)
+- Upstream `MountTable`: `crates/monty/src/fs/mount_table.rs`
+- Upstream mount-aware loop:
+  `crates/monty-python/src/monty_cls.rs:2077` (`drive_run_progress_through_os_calls`)
+- Upstream `OsFunction::on_no_handler`: `crates/monty/src/os.rs`
 - Upstream tests: `crates/monty-python/tests/test_mount_table.py`
+- This proposal's revision 1: see git history for `proposals/MOUNT_TABLE.md`
