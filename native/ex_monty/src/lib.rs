@@ -38,7 +38,11 @@ fn run<'a>(
     let mut output = String::new();
 
     let result = runner_ref
-        .run(monty_inputs, tracker, PrintWriter::CollectString(&mut output))
+        .run(
+            monty_inputs,
+            tracker,
+            PrintWriter::CollectString(&mut output),
+        )
         .map_err(error::monty_exception_to_rustler_error)?;
 
     let result_term = types::encode_monty_object(env, &result);
@@ -61,7 +65,11 @@ fn run_no_limits<'a>(
     let tracker = LimitedTracker::new(ResourceLimits::new());
 
     let result = runner_ref
-        .run(monty_inputs, tracker, PrintWriter::CollectString(&mut output))
+        .run(
+            monty_inputs,
+            tracker,
+            PrintWriter::CollectString(&mut output),
+        )
         .map_err(error::monty_exception_to_rustler_error)?;
 
     let result_term = types::encode_monty_object(env, &result);

@@ -303,6 +303,27 @@ defmodule ExMonty do
   end
 
   @doc """
+  Mount-aware variant of `resume_futures/2`. After resolving futures,
+  any subsequent OS calls are intercepted by the mount table — closes
+  the gap where futures resumption would otherwise bypass mount routing.
+  """
+  @spec resume_futures_with_mounts(
+          future_snapshot(),
+          [{non_neg_integer(), term()}],
+          ExMonty.Mount.Lease.t()
+        ) :: {:ok, progress()} | {:error, error_reason()}
+  def resume_futures_with_mounts(futures, results, %ExMonty.Mount.Lease{ref: lease_ref}) do
+    case Native.resume_futures_with_mounts(futures, results, lease_ref) do
+      {:error, reason} -> {:error, reason}
+      {:ok, progress} -> {:ok, progress}
+      progress when is_tuple(progress) -> {:ok, progress}
+    end
+  rescue
+    e in ErlangError ->
+      {:error, e.original}
+  end
+
+  @doc """
   Resumes interactive execution from a future snapshot with results for pending calls.
 
   Each result is a `{call_id, {:ok, value}}` or `{call_id, {:error, type, message}}` tuple.

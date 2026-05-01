@@ -13,6 +13,7 @@ filesystem access.
 - **Safe** --- sandboxed execution with configurable memory, time, and recursion limits
 - **Interactive** --- Python code pauses at external function calls, hands control to Elixir, and resumes with results
 - **Pseudo filesystem** --- provide virtual files and environment variables to Python code without touching the real filesystem
+- **Host filesystem mounts** --- map virtual sandbox paths to real host directories with read-only / read-write / overlay modes and symlink-escape protection
 - **Natural type mapping** --- Python types map to Elixir types (dicts to maps, sets to MapSet, etc.)
 
 ## Installation
@@ -570,12 +571,13 @@ ExMonty (Elixir API)
   |
   +-- ExMonty.Sandbox (handler behaviour, interactive loop)
   |     +-- ExMonty.PseudoFS (in-memory virtual filesystem)
+  |     +-- ExMonty.Mount (host filesystem mounts with sandboxing)
   |
   +-- ExMonty.Native (NIF bindings via Rustler)
         |
         +-- Rust NIF crate (type conversion, resource management)
               |
-              +-- monty crate (Python interpreter)
+              +-- monty crate (Python interpreter; fs::MountTable for mounts)
 ```
 
 ## License

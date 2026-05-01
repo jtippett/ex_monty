@@ -4,7 +4,9 @@ defmodule ExMonty.MountTest do
   alias ExMonty.Mount
 
   setup do
-    tmp = Path.join(System.tmp_dir!(), "ex_monty_mount_test_#{:erlang.unique_integer([:positive])}")
+    tmp =
+      Path.join(System.tmp_dir!(), "ex_monty_mount_test_#{:erlang.unique_integer([:positive])}")
+
     File.mkdir_p!(tmp)
     on_exit(fn -> File.rm_rf!(tmp) end)
     %{tmp: tmp}

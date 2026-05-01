@@ -24,8 +24,12 @@ fn start<'a>(
     let mut output = String::new();
 
     let progress = monty_run
-        .start(monty_inputs, tracker, PrintWriter::CollectString(&mut output))
-        .map_err(|e| error::monty_exception_to_rustler_error(e))?;
+        .start(
+            monty_inputs,
+            tracker,
+            PrintWriter::CollectString(&mut output),
+        )
+        .map_err(error::monty_exception_to_rustler_error)?;
 
     encode_run_progress(env, progress, &output)
 }
@@ -57,7 +61,7 @@ fn resume<'a>(
             lookup.resume(name_result, print)
         }
     }
-    .map_err(|e| error::monty_exception_to_rustler_error(e))?;
+    .map_err(error::monty_exception_to_rustler_error)?;
 
     encode_run_progress(env, progress, &output)
 }
@@ -84,7 +88,7 @@ fn resume_futures<'a>(
 
     let progress = future_snap
         .resume(external_results, PrintWriter::CollectString(&mut output))
-        .map_err(|e| error::monty_exception_to_rustler_error(e))?;
+        .map_err(error::monty_exception_to_rustler_error)?;
 
     encode_run_progress(env, progress, &output)
 }
@@ -112,24 +116,38 @@ fn encode_run_progress<'a>(
             } else {
                 Atom::from_str(env, "function_call").unwrap()
             };
-            let call_term =
-                encode_function_call(env, &call.function_name, &call.args, &call.kwargs, call.call_id);
+            let call_term = encode_function_call(
+                env,
+                &call.function_name,
+                &call.args,
+                &call.kwargs,
+                call.call_id,
+            );
             let snapshot_ref =
                 ResourceArc::new(SnapshotResource::new(SnapshotKind::FunctionCall(call)));
             Ok(rustler::types::tuple::make_tuple(
                 env,
-                &[tag.encode(env), call_term, snapshot_ref.encode(env), output_term],
+                &[
+                    tag.encode(env),
+                    call_term,
+                    snapshot_ref.encode(env),
+                    output_term,
+                ],
             ))
         }
         RunProgress::OsCall(call) => {
             let tag = Atom::from_str(env, "os_call").unwrap();
             let call_term =
                 encode_os_call(env, &call.function, &call.args, &call.kwargs, call.call_id);
-            let snapshot_ref =
-                ResourceArc::new(SnapshotResource::new(SnapshotKind::OsCall(call)));
+            let snapshot_ref = ResourceArc::new(SnapshotResource::new(SnapshotKind::OsCall(call)));
             Ok(rustler::types::tuple::make_tuple(
                 env,
-                &[tag.encode(env), call_term, snapshot_ref.encode(env), output_term],
+                &[
+                    tag.encode(env),
+                    call_term,
+                    snapshot_ref.encode(env),
+                    output_term,
+                ],
             ))
         }
         RunProgress::NameLookup(lookup) => {
@@ -139,7 +157,12 @@ fn encode_run_progress<'a>(
                 ResourceArc::new(SnapshotResource::new(SnapshotKind::NameLookup(lookup)));
             Ok(rustler::types::tuple::make_tuple(
                 env,
-                &[tag.encode(env), name_term, snapshot_ref.encode(env), output_term],
+                &[
+                    tag.encode(env),
+                    name_term,
+                    snapshot_ref.encode(env),
+                    output_term,
+                ],
             ))
         }
         RunProgress::ResolveFutures(future_snapshot) => {
@@ -376,7 +399,11 @@ fn start_with_mounts<'a>(
     let mut output = String::new();
 
     let initial = monty_run
-        .start(monty_inputs, tracker, PrintWriter::CollectString(&mut output))
+        .start(
+            monty_inputs,
+            tracker,
+            PrintWriter::CollectString(&mut output),
+        )
         .map_err(error::monty_exception_to_rustler_error)?;
 
     let progress = drive_with_mounts(initial, &lease, &mut output)
@@ -421,6 +448,37 @@ fn resume_with_mounts<'a>(
         }
     }
     .map_err(error::monty_exception_to_rustler_error)?;
+
+    let progress = drive_with_mounts(initial_progress, &lease, &mut output)
+        .map_err(error::monty_exception_to_rustler_error)?;
+
+    encode_run_progress(env, progress, &output)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn resume_futures_with_mounts<'a>(
+    env: Env<'a>,
+    futures: ResourceArc<FutureSnapshotResource>,
+    results: Vec<(u32, Term<'a>)>,
+    lease: ResourceArc<MountLease>,
+) -> NifResult<Term<'a>> {
+    let future_snap = futures
+        .take()
+        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("future snapshot already consumed")))?;
+
+    let external_results: Vec<(u32, ExtFunctionResult)> = results
+        .into_iter()
+        .map(|(id, term)| {
+            let result = decode_external_result(env, term)?;
+            Ok((id, result))
+        })
+        .collect::<NifResult<Vec<_>>>()?;
+
+    let mut output = String::new();
+
+    let initial_progress = future_snap
+        .resume(external_results, PrintWriter::CollectString(&mut output))
+        .map_err(error::monty_exception_to_rustler_error)?;
 
     let progress = drive_with_mounts(initial_progress, &lease, &mut output)
         .map_err(error::monty_exception_to_rustler_error)?;

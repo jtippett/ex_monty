@@ -1,9 +1,7 @@
 use monty::{LimitedTracker, MontyRun};
 use rustler::{Binary, Env, NifResult, OwnedBinary, ResourceArc};
 
-use crate::resources::{
-    FutureSnapshotResource, RunnerResource, SnapshotKind, SnapshotResource,
-};
+use crate::resources::{FutureSnapshotResource, RunnerResource, SnapshotKind, SnapshotResource};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RunnerDump {
@@ -82,4 +80,3 @@ fn load_future_snapshot(binary: Binary) -> NifResult<ResourceArc<FutureSnapshotR
         .map_err(|e| rustler::Error::RaiseTerm(Box::new(format!("deserialization error: {e}"))))?;
     Ok(ResourceArc::new(FutureSnapshotResource::new(snap)))
 }
-

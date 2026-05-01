@@ -85,8 +85,7 @@ defmodule ExMonty.V0017FeaturesTest do
     test "hasattr on dataclass passed from Elixir" do
       functions = %{
         "make_user" => fn _args, _kwargs ->
-          {:ok,
-           %ExMonty.Dataclass{name: "User", fields: %{"name" => "alice"}, frozen: true}}
+          {:ok, %ExMonty.Dataclass{name: "User", fields: %{"name" => "alice"}, frozen: true}}
         end
       }
 
@@ -102,8 +101,7 @@ defmodule ExMonty.V0017FeaturesTest do
     test "setattr on mutable dataclass" do
       functions = %{
         "make_user" => fn _args, _kwargs ->
-          {:ok,
-           %ExMonty.Dataclass{name: "User", fields: %{"name" => "alice"}, frozen: false}}
+          {:ok, %ExMonty.Dataclass{name: "User", fields: %{"name" => "alice"}, frozen: false}}
         end
       }
 

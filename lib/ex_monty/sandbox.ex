@@ -207,7 +207,12 @@ defmodule ExMonty.Sandbox do
     end
   end
 
-  defp run_with_optional_mounts(runner, inputs, limits, %{mounts: %ExMonty.Mount{} = mounts} = state) do
+  defp run_with_optional_mounts(
+         runner,
+         inputs,
+         limits,
+         %{mounts: %ExMonty.Mount{} = mounts} = state
+       ) do
     case ExMonty.Mount.checkout(mounts) do
       {:error, :mount_in_use} = err ->
         err
@@ -285,7 +290,7 @@ defmodule ExMonty.Sandbox do
             {id, {:ok, nil}}
           end)
 
-        case ExMonty.resume_futures(futures, results) do
+        case resume_futures_from(futures, results, state) do
           {:ok, next_progress} ->
             loop(next_progress, state, acc_output)
 
@@ -405,6 +410,12 @@ defmodule ExMonty.Sandbox do
 
   defp resume_from(snapshot, result, %{lease: lease}),
     do: ExMonty.resume_with_mounts(snapshot, result, lease)
+
+  defp resume_futures_from(futures, results, %{lease: nil}),
+    do: ExMonty.resume_futures(futures, results)
+
+  defp resume_futures_from(futures, results, %{lease: lease}),
+    do: ExMonty.resume_futures_with_mounts(futures, results, lease)
 
   defp normalize_handler_result({:ok, _} = ok), do: ok
 

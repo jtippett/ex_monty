@@ -177,17 +177,3 @@ defmodule ExMonty.Mount do
     :ok
   end
 end
-
-defmodule ExMonty.MountInUseError do
-  @moduledoc """
-  Raised by `ExMonty.Mount.list!/1` (and other bang variants, future) when
-  a mount is currently leased to a run.
-  """
-  defexception [:message]
-
-  @impl true
-  def exception(opts) do
-    msg = Keyword.get(opts, :message, "mount is currently leased to an active run")
-    %__MODULE__{message: msg}
-  end
-end

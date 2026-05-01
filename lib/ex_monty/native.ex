@@ -53,4 +53,7 @@ defmodule ExMonty.Native do
 
   def resume_with_mounts(_snapshot, _result, _lease),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  def resume_futures_with_mounts(_futures, _results, _lease),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

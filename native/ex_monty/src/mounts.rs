@@ -11,8 +11,8 @@
 //!   (idempotent) or via Drop when the term becomes unreachable.
 
 use std::sync::{
-    Mutex,
     atomic::{AtomicBool, Ordering},
+    Mutex,
 };
 
 use monty::fs::{MountMode, MountTable, OverlayState};
@@ -36,7 +36,6 @@ mod atoms {
         overlay,
         // Other
         unlimited,
-        nil,
     }
 }
 
@@ -77,7 +76,7 @@ impl ModeKind {
     }
 }
 
-fn parse_mode_atom(atom: Atom, env: Env) -> Option<ModeKind> {
+fn parse_mode_atom(atom: Atom) -> Option<ModeKind> {
     if atom == atoms::read_only() {
         Some(ModeKind::ReadOnly)
     } else if atom == atoms::read_write() {
@@ -85,7 +84,6 @@ fn parse_mode_atom(atom: Atom, env: Env) -> Option<ModeKind> {
     } else if atom == atoms::overlay() {
         Some(ModeKind::Overlay)
     } else {
-        let _ = env;
         None
     }
 }
@@ -202,7 +200,9 @@ fn encode_list_entry<'a>(env: Env<'a>, d: &MountDescriptor) -> Term<'a> {
         None => atoms::unlimited().encode(env),
     };
     map.map_put(
-        Atom::from_str(env, "write_bytes_limit").unwrap().encode(env),
+        Atom::from_str(env, "write_bytes_limit")
+            .unwrap()
+            .encode(env),
         limit_term,
     )
     .unwrap()
@@ -217,7 +217,7 @@ pub fn mounts_add<'a>(
     mode_atom: Atom,
     write_bytes_limit: Option<u64>,
 ) -> Term<'a> {
-    let mode = match parse_mode_atom(mode_atom, env) {
+    let mode = match parse_mode_atom(mode_atom) {
         Some(m) => m,
         None => return error_atom(env, atoms::invalid_mode()),
     };
@@ -233,14 +233,16 @@ pub fn mounts_add<'a>(
     // touches descriptors so this never deadlocks with it.
     let mut descriptors = resource.descriptors.lock().unwrap();
 
-    if descriptors
-        .iter()
-        .any(|d| d.virtual_path == virtual_path)
-    {
+    if descriptors.iter().any(|d| d.virtual_path == virtual_path) {
         return error_tuple(env, atoms::already_mounted(), virtual_path.encode(env));
     }
 
-    match table.mount(&virtual_path, &host_path, mode.to_mount_mode(), write_bytes_limit) {
+    match table.mount(
+        &virtual_path,
+        &host_path,
+        mode.to_mount_mode(),
+        write_bytes_limit,
+    ) {
         Ok(()) => {
             descriptors.push(MountDescriptor {
                 virtual_path,
@@ -282,10 +284,7 @@ fn classify_mount_error(err: &monty::fs::MountError) -> Atom {
 }
 
 #[rustler::nif]
-pub fn mounts_checkout<'a>(
-    env: Env<'a>,
-    resource: ResourceArc<MountResource>,
-) -> Term<'a> {
+pub fn mounts_checkout<'a>(env: Env<'a>, resource: ResourceArc<MountResource>) -> Term<'a> {
     let mut guard = resource.table.lock().unwrap();
     match guard.take() {
         Some(table) => {

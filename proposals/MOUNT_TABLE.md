@@ -14,6 +14,17 @@
 >   is permissive under lease — it reads from the descriptor side-channel
 >   like `count/1`. The original §4 lease-consistency table is corrected
 >   to reflect this.
+> - **`list!/1` and `ExMonty.MountInUseError` dropped.** Both were
+>   designed to surface the `:mount_in_use` failure of `list/1`. With
+>   `list/1` permissive in v1, neither is needed. Add them back if a
+>   future revision surfaces live state from `list/1`.
+> - **`resume_futures_with_mounts` added.** A pre-merge code review
+>   spotted that the original design routed only `start`/`resume`
+>   through mount-aware NIFs, leaving `resume_futures` to bypass mount
+>   intercept. After futures resolution, subsequent OS calls would not
+>   be checked against the mount table. Closed by adding a
+>   mount-aware variant and routing via `resume_futures_from/3` in
+>   `Sandbox.run`.
 
 > **Revision 4 changes (final review pass):**
 > - `count/1` is **permissive under lease.** Mount count and lightweight

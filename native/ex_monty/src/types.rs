@@ -113,8 +113,7 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
                     fields_map = fields_map.map_put(key, value).unwrap();
                 }
             }
-            let field_names_term: Vec<Term> =
-                field_names.iter().map(|s| s.encode(env)).collect();
+            let field_names_term: Vec<Term> = field_names.iter().map(|s| s.encode(env)).collect();
             rustler::types::map::map_new(env)
                 .map_put(
                     Atom::from_str(env, "__struct__").unwrap().encode(env),
@@ -239,17 +238,35 @@ fn encode_datetime<'a>(env: Env<'a>, dt: &MontyDateTime) -> Term<'a> {
         None => nil,
     };
     let map = rustler::types::map::map_new(env)
-        .map_put(Atom::from_str(env, "year").unwrap().encode(env), dt.year.encode(env))
+        .map_put(
+            Atom::from_str(env, "year").unwrap().encode(env),
+            dt.year.encode(env),
+        )
         .unwrap()
-        .map_put(Atom::from_str(env, "month").unwrap().encode(env), dt.month.encode(env))
+        .map_put(
+            Atom::from_str(env, "month").unwrap().encode(env),
+            dt.month.encode(env),
+        )
         .unwrap()
-        .map_put(Atom::from_str(env, "day").unwrap().encode(env), dt.day.encode(env))
+        .map_put(
+            Atom::from_str(env, "day").unwrap().encode(env),
+            dt.day.encode(env),
+        )
         .unwrap()
-        .map_put(Atom::from_str(env, "hour").unwrap().encode(env), dt.hour.encode(env))
+        .map_put(
+            Atom::from_str(env, "hour").unwrap().encode(env),
+            dt.hour.encode(env),
+        )
         .unwrap()
-        .map_put(Atom::from_str(env, "minute").unwrap().encode(env), dt.minute.encode(env))
+        .map_put(
+            Atom::from_str(env, "minute").unwrap().encode(env),
+            dt.minute.encode(env),
+        )
         .unwrap()
-        .map_put(Atom::from_str(env, "second").unwrap().encode(env), dt.second.encode(env))
+        .map_put(
+            Atom::from_str(env, "second").unwrap().encode(env),
+            dt.second.encode(env),
+        )
         .unwrap()
         .map_put(
             Atom::from_str(env, "microsecond").unwrap().encode(env),
@@ -261,7 +278,10 @@ fn encode_datetime<'a>(env: Env<'a>, dt: &MontyDateTime) -> Term<'a> {
             offset_term,
         )
         .unwrap()
-        .map_put(Atom::from_str(env, "tz_name").unwrap().encode(env), tz_name_term)
+        .map_put(
+            Atom::from_str(env, "tz_name").unwrap().encode(env),
+            tz_name_term,
+        )
         .unwrap();
     rustler::types::tuple::make_tuple(env, &[tag.encode(env), map])
 }
@@ -409,13 +429,22 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                         return Ok(MontyObject::Date(decode_date_fields(env, elements[1])?));
                     }
                     "datetime" => {
-                        return Ok(MontyObject::DateTime(decode_datetime_fields(env, elements[1])?));
+                        return Ok(MontyObject::DateTime(decode_datetime_fields(
+                            env,
+                            elements[1],
+                        )?));
                     }
                     "timedelta" => {
-                        return Ok(MontyObject::TimeDelta(decode_timedelta_fields(env, elements[1])?));
+                        return Ok(MontyObject::TimeDelta(decode_timedelta_fields(
+                            env,
+                            elements[1],
+                        )?));
                     }
                     "timezone" => {
-                        return Ok(MontyObject::TimeZone(decode_timezone_fields(env, elements[1])?));
+                        return Ok(MontyObject::TimeZone(decode_timezone_fields(
+                            env,
+                            elements[1],
+                        )?));
                     }
                     _ => {}
                 }

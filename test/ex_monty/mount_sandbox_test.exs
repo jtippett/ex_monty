@@ -255,6 +255,42 @@ defmodule ExMonty.MountSandboxTest do
 
       assert msg =~ "is not supported in this environment"
     end
+
+    test "mount path wins over PseudoFS when both configured", %{tmp: tmp} do
+      File.write!(Path.join(tmp, "shared.txt"), "from mount")
+      mounts = Mount.new!() |> Mount.add!("/shared", tmp, :read_only)
+
+      pseudo_fs =
+        ExMonty.PseudoFS.new()
+        |> ExMonty.PseudoFS.put_file("/shared/shared.txt", "from pseudofs")
+        |> ExMonty.PseudoFS.put_file("/elsewhere/data.txt", "from pseudofs only")
+
+      code = """
+      from pathlib import Path
+      Path("/shared/shared.txt").read_text()
+      """
+
+      # Mount intercepts the FS op in Rust before PseudoFS sees it.
+      assert {:ok, "from mount", ""} =
+               ExMonty.Sandbox.run(code, mounts: mounts, os: pseudo_fs)
+    end
+
+    test "PseudoFS handles unmounted paths when both configured", %{tmp: tmp} do
+      mounts = Mount.new!() |> Mount.add!("/mounted", tmp, :read_only)
+
+      pseudo_fs =
+        ExMonty.PseudoFS.new()
+        |> ExMonty.PseudoFS.put_file("/elsewhere/data.txt", "from pseudofs")
+
+      code = """
+      from pathlib import Path
+      Path("/elsewhere/data.txt").read_text()
+      """
+
+      # /elsewhere doesn't match the mount → falls through to PseudoFS.
+      assert {:ok, "from pseudofs", ""} =
+               ExMonty.Sandbox.run(code, mounts: mounts, os: pseudo_fs)
+    end
   end
 
   describe "Sandbox.run lease lifecycle" do
