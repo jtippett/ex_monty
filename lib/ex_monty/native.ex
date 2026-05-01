@@ -47,4 +47,10 @@ defmodule ExMonty.Native do
 
   def mounts_checkout(_ref), do: :erlang.nif_error(:nif_not_loaded)
   def mounts_release(_lease_ref), do: :erlang.nif_error(:nif_not_loaded)
+
+  def start_with_mounts(_runner, _inputs, _limits, _lease),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def resume_with_mounts(_snapshot, _result, _lease),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

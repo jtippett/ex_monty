@@ -161,6 +161,7 @@ defmodule ExMonty.Sandbox do
     os_handlers = opts |> Keyword.get(:os, %{}) |> normalize_os_handlers()
     limits = Keyword.get(opts, :limits, nil)
     script_name = Keyword.get(opts, :script_name, "main.py")
+    mounts = Keyword.get(opts, :mounts)
 
     input_names = inputs |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
 
@@ -169,15 +170,39 @@ defmodule ExMonty.Sandbox do
       script_name: script_name
     ]
 
-    with {:ok, runner} <- ExMonty.compile(code, compile_opts),
-         {:ok, progress} <- ExMonty.start(runner, inputs, limits: limits) do
-      state = %{
+    with {:ok, runner} <- ExMonty.compile(code, compile_opts) do
+      run_with_optional_mounts(runner, inputs, limits, %{
         handler: handler,
         functions: functions,
-        os: os_handlers
-      }
+        os: os_handlers,
+        mounts: mounts
+      })
+    end
+  end
 
+  defp run_with_optional_mounts(runner, inputs, limits, %{mounts: nil} = state) do
+    with {:ok, progress} <- ExMonty.start(runner, inputs, limits: limits) do
+      state = Map.put(state, :lease, nil)
       loop(progress, state, "")
+    end
+  end
+
+  defp run_with_optional_mounts(runner, inputs, limits, %{mounts: %ExMonty.Mount{} = mounts} = state) do
+    case ExMonty.Mount.checkout(mounts) do
+      {:error, :mount_in_use} = err ->
+        err
+
+      {:ok, lease} ->
+        try do
+          state = Map.put(state, :lease, lease)
+
+          with {:ok, progress} <-
+                 ExMonty.start_with_mounts(runner, lease, inputs, limits: limits) do
+            loop(progress, state, "")
+          end
+        after
+          ExMonty.Mount.release(lease)
+        end
     end
   end
 
@@ -187,7 +212,7 @@ defmodule ExMonty.Sandbox do
         acc_output = acc_output <> output
         result = resolve_name(name, state)
 
-        case ExMonty.resume(snapshot, result) do
+        case resume_from(snapshot, result, state) do
           {:ok, next_progress} ->
             loop(next_progress, state, acc_output)
 
@@ -199,7 +224,7 @@ defmodule ExMonty.Sandbox do
         acc_output = acc_output <> output
         result = dispatch_function(call.name, call.args, call.kwargs, state)
 
-        case ExMonty.resume(snapshot, result) do
+        case resume_from(snapshot, result, state) do
           {:ok, next_progress} ->
             loop(next_progress, state, acc_output)
 
@@ -211,7 +236,7 @@ defmodule ExMonty.Sandbox do
         acc_output = acc_output <> output
         result = dispatch_function(call.name, call.args, call.kwargs, state)
 
-        case ExMonty.resume(snapshot, result) do
+        case resume_from(snapshot, result, state) do
           {:ok, next_progress} ->
             loop(next_progress, state, acc_output)
 
@@ -223,7 +248,7 @@ defmodule ExMonty.Sandbox do
         acc_output = acc_output <> output
         {state, result} = dispatch_os(call.function, call.args, call.kwargs, state)
 
-        case ExMonty.resume(snapshot, result) do
+        case resume_from(snapshot, result, state) do
           {:ok, next_progress} ->
             loop(next_progress, state, acc_output)
 
@@ -341,12 +366,25 @@ defmodule ExMonty.Sandbox do
 
           {os, normalize_handler_result(result)}
 
+        # When a mount lease is active, defer to upstream's
+        # OsFunction::on_no_handler (PermissionError on FS, RuntimeError
+        # on non-FS) by signalling :no_handler back to Rust.
+        state.lease != nil ->
+          {os, :no_handler}
+
         true ->
           {os, {:error, :os_error, "OS operation '#{function}' is not permitted"}}
       end
 
     {%{state | os: new_os}, result}
   end
+
+  # Routes resume calls through the mount-aware variants when a lease is
+  # active so the Rust loop intercepts mount-handled FS ops.
+  defp resume_from(snapshot, result, %{lease: nil}), do: ExMonty.resume(snapshot, result)
+
+  defp resume_from(snapshot, result, %{lease: lease}),
+    do: ExMonty.resume_with_mounts(snapshot, result, lease)
 
   defp normalize_handler_result({:ok, _} = ok), do: ok
 

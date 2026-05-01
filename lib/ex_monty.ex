@@ -259,6 +259,50 @@ defmodule ExMonty do
   end
 
   @doc """
+  Mount-aware variant of `start/3`. Filesystem operations matching a mount
+  in the leased mount table are intercepted in Rust without surfacing to
+  Elixir. Unmounted FS ops and non-FS ops surface as `:os_call` progress
+  for fallback dispatch.
+
+  Most users invoke this transparently via `ExMonty.Sandbox.run/2` with
+  the `:mounts` option.
+  """
+  @spec start_with_mounts(runner(), ExMonty.Mount.Lease.t(), map(), keyword()) ::
+          {:ok, progress()} | {:error, error_reason()}
+  def start_with_mounts(runner, %ExMonty.Mount.Lease{ref: lease_ref}, inputs \\ %{}, opts \\ []) do
+    limits = Keyword.get(opts, :limits, nil)
+    input_list = Enum.map(inputs, fn {k, v} -> {to_string(k), v} end)
+
+    case Native.start_with_mounts(runner, input_list, limits, lease_ref) do
+      {:error, reason} -> {:error, reason}
+      {:ok, progress} -> {:ok, progress}
+      progress when is_tuple(progress) -> {:ok, progress}
+    end
+  rescue
+    e in ErlangError ->
+      {:error, e.original}
+  end
+
+  @doc """
+  Mount-aware variant of `resume/2`. Pass `:no_handler` as the result
+  for an `:os_call` snapshot to delegate to upstream's
+  `OsFunction::on_no_handler` semantics (`PermissionError` for FS,
+  `RuntimeError` for non-FS).
+  """
+  @spec resume_with_mounts(snapshot(), term(), ExMonty.Mount.Lease.t()) ::
+          {:ok, progress()} | {:error, error_reason()}
+  def resume_with_mounts(snapshot, result, %ExMonty.Mount.Lease{ref: lease_ref}) do
+    case Native.resume_with_mounts(snapshot, result, lease_ref) do
+      {:error, reason} -> {:error, reason}
+      {:ok, progress} -> {:ok, progress}
+      progress when is_tuple(progress) -> {:ok, progress}
+    end
+  rescue
+    e in ErlangError ->
+      {:error, e.original}
+  end
+
+  @doc """
   Resumes interactive execution from a future snapshot with results for pending calls.
 
   Each result is a `{call_id, {:ok, value}}` or `{call_id, {:error, type, message}}` tuple.

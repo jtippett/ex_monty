@@ -6,6 +6,7 @@ use rustler::types::atom::Atom;
 use rustler::{Encoder, Env, NifResult, ResourceArc, Term};
 
 use crate::error;
+use crate::mounts::MountLease;
 use crate::resources::{FutureSnapshotResource, RunnerResource, SnapshotKind, SnapshotResource};
 use crate::types;
 
@@ -349,4 +350,142 @@ fn parse_exc_type(s: &str) -> monty::ExcType {
         })
         .collect::<String>();
     monty::ExcType::from_str(&pascal).unwrap_or(monty::ExcType::RuntimeError)
+}
+
+// ── Mount-aware variants ─────────────────────────────────────────────────
+//
+// These mirror upstream's `drive_run_progress_through_os_calls`
+// (monty-python `crates/monty-python/src/monty_cls.rs`). Filesystem ops
+// matching a mount are handled inside Rust and resumed without returning
+// to Elixir. Non-FS ops, unmounted FS ops, and all non-OsCall progress
+// variants break out of the loop and surface to Elixir via
+// `encode_run_progress`.
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn start_with_mounts<'a>(
+    env: Env<'a>,
+    runner: ResourceArc<RunnerResource>,
+    inputs: Vec<(String, Term<'a>)>,
+    limits: Term<'a>,
+    lease: ResourceArc<MountLease>,
+) -> NifResult<Term<'a>> {
+    let monty_run = runner.clone_runner();
+    let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
+    let resource_limits = types::decode_resource_limits(limits)?;
+    let tracker = LimitedTracker::new(resource_limits);
+    let mut output = String::new();
+
+    let initial = monty_run
+        .start(monty_inputs, tracker, PrintWriter::CollectString(&mut output))
+        .map_err(error::monty_exception_to_rustler_error)?;
+
+    let progress = drive_with_mounts(initial, &lease, &mut output)
+        .map_err(error::monty_exception_to_rustler_error)?;
+
+    encode_run_progress(env, progress, &output)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn resume_with_mounts<'a>(
+    env: Env<'a>,
+    snapshot: ResourceArc<SnapshotResource>,
+    result: Term<'a>,
+    lease: ResourceArc<MountLease>,
+) -> NifResult<Term<'a>> {
+    let snap = snapshot
+        .take()
+        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("snapshot already consumed")))?;
+
+    let mut output = String::new();
+    let print = PrintWriter::CollectString(&mut output);
+
+    // Detect `:no_handler` from Elixir for OsCall snapshots — translate
+    // into upstream's canonical `OsFunction::on_no_handler` exception
+    // before resuming. For other snapshot kinds, decode normally.
+    let initial_progress = match snap {
+        SnapshotKind::OsCall(call) if is_no_handler_atom(result) => {
+            let exc = call.function.on_no_handler(&call.args);
+            call.resume(ExtFunctionResult::Error(exc), print)
+        }
+        SnapshotKind::OsCall(call) => {
+            let external_result = decode_external_result(env, result)?;
+            call.resume(external_result, print)
+        }
+        SnapshotKind::FunctionCall(call) => {
+            let external_result = decode_external_result(env, result)?;
+            call.resume(external_result, print)
+        }
+        SnapshotKind::NameLookup(lookup) => {
+            let name_result = decode_name_lookup_result(env, result)?;
+            lookup.resume(name_result, print)
+        }
+    }
+    .map_err(error::monty_exception_to_rustler_error)?;
+
+    let progress = drive_with_mounts(initial_progress, &lease, &mut output)
+        .map_err(error::monty_exception_to_rustler_error)?;
+
+    encode_run_progress(env, progress, &output)
+}
+
+fn is_no_handler_atom(term: Term<'_>) -> bool {
+    if !term.is_atom() {
+        return false;
+    }
+    matches!(term.atom_to_string().as_deref(), Ok("no_handler"))
+}
+
+/// Drives the os-call loop for mount-aware runs.
+///
+/// Locks the lease's table for the duration of this NIF call. Mount-handled
+/// FS ops are resumed in-place without returning to Elixir. Returns when
+/// any non-OsCall progress arrives, or when an OsCall doesn't match any
+/// mount (non-FS or unmounted path).
+fn drive_with_mounts(
+    initial: RunProgress<LimitedTracker>,
+    lease: &MountLease,
+    output: &mut String,
+) -> Result<RunProgress<LimitedTracker>, MontyException> {
+    let mut guard = match lease.table.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let table = match guard.as_mut() {
+        Some(t) => t,
+        None => {
+            // Lease was released between checkout and this NIF call —
+            // shouldn't happen under correct Sandbox.run flow, but be
+            // defensive.
+            return Err(MontyException::new(
+                monty::ExcType::RuntimeError,
+                Some("mount lease has been released".to_string()),
+            ));
+        }
+    };
+
+    let mut current = initial;
+    loop {
+        match current {
+            RunProgress::OsCall(call) => {
+                match table.handle_os_call(call.function, &call.args, &call.kwargs) {
+                    Some(Ok(obj)) => {
+                        let print = PrintWriter::CollectString(output);
+                        current = call.resume(ExtFunctionResult::Return(obj), print)?;
+                    }
+                    Some(Err(mount_err)) => {
+                        let exc = mount_err.into_exception();
+                        let print = PrintWriter::CollectString(output);
+                        current = call.resume(ExtFunctionResult::Error(exc), print)?;
+                    }
+                    None => {
+                        // Non-FS op or unmounted FS path — surface to
+                        // Elixir so a fallback handler can take it.
+                        return Ok(RunProgress::OsCall(call));
+                    }
+                }
+            }
+            other => return Ok(other),
+        }
+    }
 }
