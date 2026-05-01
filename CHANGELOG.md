@@ -1,5 +1,80 @@
 # Changelog
 
+## [Unreleased]
+
+### New ExMonty Features
+
+- **`datetime` support.** `date`, `datetime`, `timedelta`, and `timezone`
+  Python values round-trip via new tagged tuples:
+
+  ```elixir
+  # Output direction (Python → Elixir)
+  ExMonty.eval("from datetime import date\ndate(2026, 5, 1)")
+  # {:ok, {:date, %{year: 2026, month: 5, day: 1}}, ""}
+
+  # Input direction (Elixir → Python)
+  ExMonty.eval("x.year",
+    inputs: %{"x" => {:date, %{year: 2026, month: 5, day: 1}}})
+  # {:ok, 2026, ""}
+
+  # date.today() / datetime.now() via host handlers
+  ExMonty.Sandbox.run("from datetime import date\ndate.today()",
+    os: %{date_today: fn _, _ -> {:ok, {:date, %{year: 2026, month: 5, day: 1}}} end})
+  ```
+
+  Encoded shapes:
+  - `{:date, %{year, month, day}}`
+  - `{:datetime, %{year, month, day, hour, minute, second, microsecond, offset_seconds, tz_name}}`
+    (`offset_seconds` and `tz_name` are `nil` for naive datetimes)
+  - `{:timedelta, %{days, seconds, microseconds}}`
+  - `{:timezone, %{offset_seconds, name}}`
+
+- **New OS handler atoms** `:date_today` and `:datetime_now` surfaced through
+  `ExMonty.Sandbox` for hosts to provide deterministic clocks.
+
+### Bug Fixes
+
+- **Sandbox handler allowlist.** `ExMonty.Sandbox` now accepts `:date_today` /
+  `:datetime_now` keys in `os:` handler maps (previously they were silently
+  dropped).
+
+### Upstream Python Features (monty v0.0.8 → v0.0.17)
+
+These come from upstream and don't change the ExMonty API — but they affect
+what Python code you can run:
+
+- **`json` module.** `import json; json.loads(...) / json.dumps(...)`.
+- **`datetime` module.** `date`, `datetime`, `timedelta`, `timezone` (see above).
+- **Multi-module imports.** `import a, b, c` in one statement.
+- **Chain assignment.** `a = b = c = 1`.
+- **Nested subscript assignment.** `d[k][i] = v`, `matrix[i][j] = 0`.
+- **`hasattr` / `setattr`.** Work on host-provided objects (dataclasses, modules).
+  Class definitions in Python source are still not supported.
+- **`zip(..., strict=True)`.** Raises `ValueError` on length mismatch.
+- **`str.expandtabs(tabsize)`.**
+- **Named single-kwarg calls.** `f(x=1)` (single-kwarg edge case fixed).
+- **`INT_MAX_STR_DIGITS` guard.** `int("1" * 5000)` raises `ValueError`,
+  matching CPython's quadratic-time DoS protection (default 4300 digits).
+- **Bug fixes:** `i64::MIN` negation panic, source-line >65535 parse panic,
+  partial future-resolution panic in mixed gathers, GC interval ignored in
+  tracker, GC reference release in cycles, empty-tuple singleton counted
+  against memory limit.
+
+### Not Yet Exposed to Elixir
+
+- **Filesystem mounting** (`MountTable` API) — upstream supports overlay /
+  read-only / layered filesystems. ExMonty's `PseudoFS` does not yet wrap this.
+- **Async in Rust** — internal VM async support; no surface change for Elixir
+  callers today.
+- **`MontyRepl` / `JsonMontyObject`** — Rust-only APIs.
+
+### Internal
+
+- **monty pinned to v0.0.17** (commit `5c7cf2b6`). Update procedure now tracks
+  tagged releases by default; see `UPDATE_PROCEDURE.md`.
+- **`PrintWriter::Collect` renamed to `PrintWriter::CollectString`** in monty
+  upstream — internal NIF change only, no Elixir-side impact.
+
 ## 0.3.0
 
 ### Breaking Changes

@@ -185,6 +185,8 @@ Path('/output/result.txt').read_text()
 | `Path.absolute()`         | `:absolute`   | Get absolute path              |
 | `os.getenv(key)`          | `:getenv`     | Get environment variable       |
 | `os.environ`              | `:get_environ`| Get all environment variables  |
+| `date.today()`            | `:date_today` | Today's date from the host clock |
+| `datetime.now(tz=...)`    | `:datetime_now` | Current datetime from the host clock; first arg is timezone or `nil` |
 
 ### Custom OS Handlers
 
@@ -225,6 +227,42 @@ defmodule MyOsHandler do
   end
 end
 ```
+
+### Clock Handlers (`date.today()` / `datetime.now()`)
+
+Python's `date.today()` and `datetime.now()` are surfaced as `:date_today` and
+`:datetime_now` os calls. Provide handlers to control what "now" means — useful
+for deterministic tests, time-travel, or pinning to a request timestamp:
+
+```elixir
+{:ok, result, _} = ExMonty.Sandbox.run(
+  """
+  from datetime import date, datetime, timezone
+  d = date.today()
+  dt = datetime.now(tz=timezone.utc)
+  (d.year, dt.hour, dt.tzinfo is not None)
+  """,
+  os: %{
+    date_today: fn _args, _kwargs ->
+      {:ok, {:date, %{year: 2026, month: 5, day: 1}}}
+    end,
+    datetime_now: fn _args, _kwargs ->
+      {:ok,
+       {:datetime,
+        %{
+          year: 2026, month: 5, day: 1,
+          hour: 14, minute: 30, second: 0, microsecond: 0,
+          offset_seconds: 0, tz_name: nil
+        }}}
+    end
+  }
+)
+# result = {2026, 14, true}
+```
+
+The handler's first argument for `:datetime_now` is the requested timezone
+(`{:timezone, %{offset_seconds: ..., name: ...}}` for an aware datetime, or
+`nil` for a naive one). If you don't care, ignore it; if you do, branch on it.
 
 ## Resource Limits
 
@@ -270,6 +308,74 @@ Runners and snapshots can be serialized to binary for storage or transfer:
 {:ok, {:complete, result, _}} = ExMonty.resume(restored_snap, {:ok, value})
 ```
 
+## Python Support
+
+Monty does **not** implement all of CPython. It targets a useful subset of the
+language and standard library — enough to evaluate expressions, scripts, and
+data transformations safely. This section calls out features that frequently
+trip people up.
+
+### Standard Library
+
+```python
+import math, json, re      # multi-module import works
+math.pi                     # 3.14159...
+json.dumps([1, 2, 3])       # '[1, 2, 3]'
+json.loads('{"a": 1}')      # {'a': 1}  → Elixir %{"a" => 1}
+re.match(r"\d+", "42")      # match object
+```
+
+Available modules: `math`, `json`, `re`, `os` (host-mediated), `pathlib`
+(host-mediated), `datetime` (host-mediated for `today()` / `now()`).
+
+### Syntax
+
+```python
+# Multi-module import
+import a, b, c
+
+# Chain assignment
+a = b = c = 7
+
+# Nested subscript assignment
+d["k"][1] = 99
+matrix[i][j] = 0
+
+# Generalised unpacking (PEP 448)
+[*a, *b]
+{**defaults, **overrides}
+
+# Augmented subscript assignment
+counts[k] += 1
+```
+
+Class definitions are **not** supported — use `@dataclass` or pass objects in
+from Elixir as `%ExMonty.Dataclass{}`. `hasattr` and `setattr` work on those
+host-provided objects:
+
+```python
+hasattr(user, "email")     # works on dataclasses passed from Elixir
+setattr(user, "name", "x") # works if dataclass is mutable (frozen=False)
+```
+
+### Built-ins
+
+```python
+zip([1,2,3], [4,5], strict=True)   # raises ValueError on length mismatch
+"a\tb\tc".expandtabs(4)             # "a   b   c"
+list(filter(None, items))           # filter, map, sorted, max, min, ...
+```
+
+### `int()` Parse Limits
+
+CPython's `INT_MAX_STR_DIGITS` guard is enforced (default 4300 digits). This
+prevents quadratic-time DoS via huge numeric strings:
+
+```python
+int("1" * 5000)
+# ValueError: Exceeds the limit (4300 digits) for integer string conversion
+```
+
 ## Type Mapping
 
 | Python              | Elixir                          | Notes                                  |
@@ -288,6 +394,10 @@ Runners and snapshots can be serialized to binary for storage or transfer:
 | `Path`              | `{:path, string}`               |                                        |
 | `NamedTuple`        | `{:named_tuple, type_name, fields}` | `type_name` is a string; `fields` is an ordered list of `{field_name, value}` pairs |
 | `@dataclass`        | `%ExMonty.Dataclass{}`          | `fields` keys are strings              |
+| `datetime.date`     | `{:date, %{year, month, day}}`  | Output-only today                       |
+| `datetime.datetime` | `{:datetime, %{year, month, day, hour, minute, second, microsecond, offset_seconds, tz_name}}` | `offset_seconds`/`tz_name` are `nil` for naive datetimes |
+| `datetime.timedelta`| `{:timedelta, %{days, seconds, microseconds}}` |                                |
+| `datetime.timezone` | `{:timezone, %{offset_seconds, name}}` | `name` may be `nil`                       |
 | Exception           | `%ExMonty.Exception{}`          | With type, message, traceback          |
 
 ### Input Direction (Elixir to Python)
@@ -304,6 +414,21 @@ ExMonty.eval("x", inputs: %{"x" => %{"a" => 1}}) # dict
 # Tagged
 ExMonty.eval("x", inputs: %{"x" => {:bytes, <<1, 2, 3>>}}) # bytes
 ExMonty.eval("x", inputs: %{"x" => {:path, "/tmp/file"}})   # Path
+
+# datetime types — same shape on input and output
+ExMonty.eval("x.year", inputs: %{"x" => {:date, %{year: 2026, month: 5, day: 1}}})
+# {:ok, 2026, ""}
+
+ExMonty.eval("x.tzinfo is not None",
+  inputs: %{"x" => {:datetime, %{
+    year: 2026, month: 5, day: 1,
+    hour: 12, minute: 0, second: 0, microsecond: 0,
+    offset_seconds: 0, tz_name: nil
+  }}})
+# {:ok, true, ""}
+
+ExMonty.eval("x.days", inputs: %{"x" => {:timedelta, %{days: 7, seconds: 0, microseconds: 0}}})
+# {:ok, 7, ""}
 ```
 
 ## Error Handling

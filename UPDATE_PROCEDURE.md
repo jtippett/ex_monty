@@ -8,28 +8,30 @@ ExMonty pins a specific monty git revision in `native/ex_monty/Cargo.toml`. Upst
 monty is under active development (~200+ commits since Jan 2025). This procedure walks
 through pulling, assessing, and integrating changes.
 
+**Track tagged releases, not `main`.** Upstream cuts `v0.0.x` tags; target the latest tag
+unless the user explicitly asks to chase `main` (e.g. for a specific unreleased fix).
+The bleeding edge is fine for upstream contributors but exposes us to in-flight refactors.
+
 ---
 
 ## Phase 1: Pull and Assess
 
-### 1.1 Fetch latest upstream
+### 1.1 Fetch latest upstream and find the latest tag
 
 ```bash
-cd ../monty && git fetch origin && git log --oneline HEAD..origin/main
+cd ../monty && git fetch origin --tags
+git tag --sort=-version:refname | head -5
 ```
 
 (The monty repo is at `../monty` relative to the ex_monty project root.)
 
-If you maintain a local branch, also:
-
-```bash
-git pull origin main
-```
+Pick the highest `v0.0.x` tag. That's the **target rev** for this update.
 
 ### 1.2 Identify our current pin
 
 ```bash
 grep 'rev = ' native/ex_monty/Cargo.toml
+git describe --tags <OUR_PINNED_REV>   # context: which tag are we at/after?
 ```
 
 ### 1.3 Review changes since our pin
@@ -38,7 +40,7 @@ This is the critical step. Focus on the public API surface.
 
 ```bash
 cd ../monty
-git diff <OUR_PINNED_REV>..origin/main -- crates/monty/src/lib.rs
+git diff <OUR_PINNED_REV>..<TARGET_TAG> -- crates/monty/src/lib.rs
 ```
 
 This file contains **all** public re-exports. Any change here directly affects us.
@@ -53,7 +55,7 @@ Then review the implementation files behind our dependencies:
 
 ```bash
 # Our full API surface — review changes in these modules:
-git diff <OUR_PINNED_REV>..origin/main -- \
+git diff <OUR_PINNED_REV>..<TARGET_TAG> -- \
   crates/monty/src/run.rs \
   crates/monty/src/object.rs \
   crates/monty/src/os.rs \
@@ -66,7 +68,7 @@ git diff <OUR_PINNED_REV>..origin/main -- \
 ### 1.4 Read the commit log for context
 
 ```bash
-git log --oneline <OUR_PINNED_REV>..origin/main -- crates/monty/
+git log --oneline <OUR_PINNED_REV>..<TARGET_TAG> -- crates/monty/
 ```
 
 Pay attention to commits that mention: breaking changes, API changes, new features,
@@ -191,7 +193,9 @@ exercising them through `ExMonty.eval/2` or the sandbox.
 monty = { git = "https://github.com/pydantic/monty.git", rev = "<NEW_COMMIT_HASH>" }
 ```
 
-Use the full 40-char hash of the monty commit you tested against.
+Use the full 40-char hash of the monty commit the **target tag** points at
+(`git rev-parse <TARGET_TAG>^{commit}`). Pinning to a hash rather than the tag itself
+means the dep can't silently move if a tag is force-updated.
 
 ### 4.2 Verify clean build from git dep
 
@@ -220,10 +224,13 @@ Update monty to <short-hash>
 
 ## Quick Reference: One-liner Diff Check
 
-To quickly check if there are API changes worth pulling:
+To quickly check if there are API changes worth pulling, against the latest tag:
 
 ```bash
-cd ../monty && git fetch origin && git diff $(grep -oP 'rev = "\K[^"]+' ../ex_monty/native/ex_monty/Cargo.toml)..origin/main -- crates/monty/src/lib.rs
+cd ../monty && git fetch origin --tags && \
+  LATEST_TAG=$(git tag --sort=-version:refname | head -1) && \
+  git diff $(grep -oP 'rev = "\K[^"]+' ../ex_monty/native/ex_monty/Cargo.toml)..$LATEST_TAG \
+    -- crates/monty/src/lib.rs
 ```
 
 If this diff is empty, there are no public API changes — only internal improvements.
@@ -233,7 +240,8 @@ Still worth updating periodically for bug fixes.
 
 ## When to Update
 
-- **Immediately** if upstream fixes a bug affecting us
-- **Weekly-ish** during active monty development
-- **Before any ExMonty release** to pick up latest fixes
+- **When upstream cuts a new tag** (`v0.0.x`) — that's the natural cadence
+- **Immediately** if upstream fixes a bug affecting us (then either chase `main` or wait
+  for the next tag, depending on severity — ask the user)
+- **Before any ExMonty release** to pick up the latest stable tag
 - **When a new MontyObject/OsFunction variant** is needed for a feature we want

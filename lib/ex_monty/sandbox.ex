@@ -51,6 +51,28 @@ defmodule ExMonty.Sandbox do
         }
       )
 
+  ## Clock Handlers
+
+  `date.today()` and `datetime.now()` are surfaced as `:date_today` and
+  `:datetime_now` os calls. Provide handlers in the `:os` map to control what
+  "now" means (deterministic tests, time-travel, request timestamps, etc.):
+
+      now = DateTime.utc_now()
+
+      {:ok, _result, _} = ExMonty.Sandbox.run(
+        "from datetime import datetime, timezone\\ndatetime.now(tz=timezone.utc).year",
+        os: %{
+          datetime_now: fn _args, _kwargs ->
+            {:ok, {:datetime, %{
+              year: now.year, month: now.month, day: now.day,
+              hour: now.hour, minute: now.minute, second: now.second,
+              microsecond: elem(now.microsecond, 0),
+              offset_seconds: 0, tz_name: nil
+            }}}
+          end
+        }
+      )
+
   ## Pseudo Filesystem
 
   Pass an `ExMonty.PseudoFS` as the `:os` option for sandboxed filesystem access:
@@ -364,7 +386,9 @@ defmodule ExMonty.Sandbox do
     "resolve" => :resolve,
     "absolute" => :absolute,
     "getenv" => :getenv,
-    "get_environ" => :get_environ
+    "get_environ" => :get_environ,
+    "date_today" => :date_today,
+    "datetime_now" => :datetime_now
   }
 
   defp normalize_os_handlers(%ExMonty.PseudoFS{} = fs), do: fs

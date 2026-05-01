@@ -1,4 +1,7 @@
-use monty::{DictPairs, MontyObject, OsFunction, ResourceLimits};
+use monty::{
+    DictPairs, MontyDate, MontyDateTime, MontyObject, MontyTimeDelta, MontyTimeZone, OsFunction,
+    ResourceLimits,
+};
 use num_bigint::BigInt;
 use rustler::types::atom::Atom;
 use rustler::types::map::MapIterator;
@@ -196,7 +199,110 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
             };
             rustler::types::tuple::make_tuple(env, &[tag.encode(env), name.encode(env), doc])
         }
+        MontyObject::Date(d) => encode_date(env, d),
+        MontyObject::DateTime(dt) => encode_datetime(env, dt),
+        MontyObject::TimeDelta(td) => encode_timedelta(env, td),
+        MontyObject::TimeZone(tz) => encode_timezone(env, tz),
     }
+}
+
+fn encode_date<'a>(env: Env<'a>, d: &MontyDate) -> Term<'a> {
+    let tag = Atom::from_str(env, "date").unwrap();
+    let map = rustler::types::map::map_new(env)
+        .map_put(
+            Atom::from_str(env, "year").unwrap().encode(env),
+            d.year.encode(env),
+        )
+        .unwrap()
+        .map_put(
+            Atom::from_str(env, "month").unwrap().encode(env),
+            d.month.encode(env),
+        )
+        .unwrap()
+        .map_put(
+            Atom::from_str(env, "day").unwrap().encode(env),
+            d.day.encode(env),
+        )
+        .unwrap();
+    rustler::types::tuple::make_tuple(env, &[tag.encode(env), map])
+}
+
+fn encode_datetime<'a>(env: Env<'a>, dt: &MontyDateTime) -> Term<'a> {
+    let tag = Atom::from_str(env, "datetime").unwrap();
+    let nil = rustler::types::atom::nil().encode(env);
+    let offset_term = match dt.offset_seconds {
+        Some(s) => s.encode(env),
+        None => nil,
+    };
+    let tz_name_term = match &dt.timezone_name {
+        Some(s) => s.encode(env),
+        None => nil,
+    };
+    let map = rustler::types::map::map_new(env)
+        .map_put(Atom::from_str(env, "year").unwrap().encode(env), dt.year.encode(env))
+        .unwrap()
+        .map_put(Atom::from_str(env, "month").unwrap().encode(env), dt.month.encode(env))
+        .unwrap()
+        .map_put(Atom::from_str(env, "day").unwrap().encode(env), dt.day.encode(env))
+        .unwrap()
+        .map_put(Atom::from_str(env, "hour").unwrap().encode(env), dt.hour.encode(env))
+        .unwrap()
+        .map_put(Atom::from_str(env, "minute").unwrap().encode(env), dt.minute.encode(env))
+        .unwrap()
+        .map_put(Atom::from_str(env, "second").unwrap().encode(env), dt.second.encode(env))
+        .unwrap()
+        .map_put(
+            Atom::from_str(env, "microsecond").unwrap().encode(env),
+            dt.microsecond.encode(env),
+        )
+        .unwrap()
+        .map_put(
+            Atom::from_str(env, "offset_seconds").unwrap().encode(env),
+            offset_term,
+        )
+        .unwrap()
+        .map_put(Atom::from_str(env, "tz_name").unwrap().encode(env), tz_name_term)
+        .unwrap();
+    rustler::types::tuple::make_tuple(env, &[tag.encode(env), map])
+}
+
+fn encode_timedelta<'a>(env: Env<'a>, td: &MontyTimeDelta) -> Term<'a> {
+    let tag = Atom::from_str(env, "timedelta").unwrap();
+    let map = rustler::types::map::map_new(env)
+        .map_put(
+            Atom::from_str(env, "days").unwrap().encode(env),
+            td.days.encode(env),
+        )
+        .unwrap()
+        .map_put(
+            Atom::from_str(env, "seconds").unwrap().encode(env),
+            td.seconds.encode(env),
+        )
+        .unwrap()
+        .map_put(
+            Atom::from_str(env, "microseconds").unwrap().encode(env),
+            td.microseconds.encode(env),
+        )
+        .unwrap();
+    rustler::types::tuple::make_tuple(env, &[tag.encode(env), map])
+}
+
+fn encode_timezone<'a>(env: Env<'a>, tz: &MontyTimeZone) -> Term<'a> {
+    let tag = Atom::from_str(env, "timezone").unwrap();
+    let nil = rustler::types::atom::nil().encode(env);
+    let name_term = match &tz.name {
+        Some(s) => s.encode(env),
+        None => nil,
+    };
+    let map = rustler::types::map::map_new(env)
+        .map_put(
+            Atom::from_str(env, "offset_seconds").unwrap().encode(env),
+            tz.offset_seconds.encode(env),
+        )
+        .unwrap()
+        .map_put(Atom::from_str(env, "name").unwrap().encode(env), name_term)
+        .unwrap();
+    rustler::types::tuple::make_tuple(env, &[tag.encode(env), map])
 }
 
 fn encode_mapset<'a>(env: Env<'a>, members: &[Term<'a>]) -> Term<'a> {
@@ -298,6 +404,18 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                             name,
                             docstring: None,
                         });
+                    }
+                    "date" => {
+                        return Ok(MontyObject::Date(decode_date_fields(env, elements[1])?));
+                    }
+                    "datetime" => {
+                        return Ok(MontyObject::DateTime(decode_datetime_fields(env, elements[1])?));
+                    }
+                    "timedelta" => {
+                        return Ok(MontyObject::TimeDelta(decode_timedelta_fields(env, elements[1])?));
+                    }
+                    "timezone" => {
+                        return Ok(MontyObject::TimeZone(decode_timezone_fields(env, elements[1])?));
                     }
                     _ => {}
                 }
@@ -539,8 +657,98 @@ pub fn encode_os_function<'a>(env: Env<'a>, func: &OsFunction) -> Term<'a> {
         OsFunction::Absolute => "absolute",
         OsFunction::Getenv => "getenv",
         OsFunction::GetEnviron => "get_environ",
+        OsFunction::DateToday => "date_today",
+        OsFunction::DateTimeNow => "datetime_now",
     };
     Atom::from_str(env, name).unwrap().encode(env)
+}
+
+fn map_get_atom<'a>(env: Env<'a>, map: Term<'a>, key: &str) -> NifResult<Term<'a>> {
+    map.map_get(Atom::from_str(env, key).unwrap().encode(env))
+        .map_err(|_| rustler::Error::BadArg)
+}
+
+fn map_get_optional_string<'a>(
+    env: Env<'a>,
+    map: Term<'a>,
+    key: &str,
+) -> NifResult<Option<String>> {
+    let term = match map.map_get(Atom::from_str(env, key).unwrap().encode(env)) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    if term.is_atom() {
+        let s = term.atom_to_string().map_err(|_| rustler::Error::BadArg)?;
+        if s == "nil" {
+            return Ok(None);
+        }
+        return Ok(Some(s));
+    }
+    Ok(Some(term.decode()?))
+}
+
+fn map_get_optional_i32<'a>(env: Env<'a>, map: Term<'a>, key: &str) -> NifResult<Option<i32>> {
+    let term = match map.map_get(Atom::from_str(env, key).unwrap().encode(env)) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    if term.is_atom() {
+        let s = term.atom_to_string().map_err(|_| rustler::Error::BadArg)?;
+        if s == "nil" {
+            return Ok(None);
+        }
+        return Err(rustler::Error::BadArg);
+    }
+    Ok(Some(term.decode()?))
+}
+
+fn decode_date_fields<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyDate> {
+    if !term.is_map() {
+        return Err(rustler::Error::BadArg);
+    }
+    Ok(MontyDate {
+        year: map_get_atom(env, term, "year")?.decode()?,
+        month: map_get_atom(env, term, "month")?.decode()?,
+        day: map_get_atom(env, term, "day")?.decode()?,
+    })
+}
+
+fn decode_datetime_fields<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyDateTime> {
+    if !term.is_map() {
+        return Err(rustler::Error::BadArg);
+    }
+    Ok(MontyDateTime {
+        year: map_get_atom(env, term, "year")?.decode()?,
+        month: map_get_atom(env, term, "month")?.decode()?,
+        day: map_get_atom(env, term, "day")?.decode()?,
+        hour: map_get_atom(env, term, "hour")?.decode()?,
+        minute: map_get_atom(env, term, "minute")?.decode()?,
+        second: map_get_atom(env, term, "second")?.decode()?,
+        microsecond: map_get_atom(env, term, "microsecond")?.decode()?,
+        offset_seconds: map_get_optional_i32(env, term, "offset_seconds")?,
+        timezone_name: map_get_optional_string(env, term, "tz_name")?,
+    })
+}
+
+fn decode_timedelta_fields<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyTimeDelta> {
+    if !term.is_map() {
+        return Err(rustler::Error::BadArg);
+    }
+    Ok(MontyTimeDelta {
+        days: map_get_atom(env, term, "days")?.decode()?,
+        seconds: map_get_atom(env, term, "seconds")?.decode()?,
+        microseconds: map_get_atom(env, term, "microseconds")?.decode()?,
+    })
+}
+
+fn decode_timezone_fields<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyTimeZone> {
+    if !term.is_map() {
+        return Err(rustler::Error::BadArg);
+    }
+    Ok(MontyTimeZone {
+        offset_seconds: map_get_atom(env, term, "offset_seconds")?.decode()?,
+        name: map_get_optional_string(env, term, "name")?,
+    })
 }
 
 fn decode_named_tuple<'a>(

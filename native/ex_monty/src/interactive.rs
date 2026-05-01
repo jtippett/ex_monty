@@ -23,7 +23,7 @@ fn start<'a>(
     let mut output = String::new();
 
     let progress = monty_run
-        .start(monty_inputs, tracker, PrintWriter::Collect(&mut output))
+        .start(monty_inputs, tracker, PrintWriter::CollectString(&mut output))
         .map_err(|e| error::monty_exception_to_rustler_error(e))?;
 
     encode_run_progress(env, progress, &output)
@@ -40,7 +40,7 @@ fn resume<'a>(
         .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("snapshot already consumed")))?;
 
     let mut output = String::new();
-    let print = PrintWriter::Collect(&mut output);
+    let print = PrintWriter::CollectString(&mut output);
 
     let progress = match snap {
         SnapshotKind::FunctionCall(call) => {
@@ -82,7 +82,7 @@ fn resume_futures<'a>(
     let mut output = String::new();
 
     let progress = future_snap
-        .resume(external_results, PrintWriter::Collect(&mut output))
+        .resume(external_results, PrintWriter::CollectString(&mut output))
         .map_err(|e| error::monty_exception_to_rustler_error(e))?;
 
     encode_run_progress(env, progress, &output)

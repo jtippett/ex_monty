@@ -7,7 +7,8 @@ defmodule ExMonty.OsCall do
 
   ## Fields
 
-    * `:function` - the OS function as an atom (e.g., `:read_text`, `:exists`, `:write_text`)
+    * `:function` - the OS function as an atom (e.g., `:read_text`, `:exists`,
+      `:write_text`, `:getenv`, `:get_environ`, `:date_today`, `:datetime_now`)
     * `:args` - list of positional arguments
     * `:kwargs` - map of keyword arguments
     * `:call_id` - unique identifier for this call within the execution
