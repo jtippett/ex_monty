@@ -264,6 +264,121 @@ The handler's first argument for `:datetime_now` is the requested timezone
 (`{:timezone, %{offset_seconds: ..., name: ...}}` for an aware datetime, or
 `nil` for a naive one). If you don't care, ignore it; if you do, branch on it.
 
+## Host Filesystem Mounts
+
+`ExMonty.PseudoFS` is purely in-memory. When you need the sandbox to read
+real host directories — but with sandboxing guarantees — use
+`ExMonty.Mount`. A mount maps a virtual path inside the sandbox to a host
+directory with one of three access modes. Path canonicalisation, boundary
+checks, and symlink-escape detection are always enforced.
+
+```elixir
+mounts =
+  ExMonty.Mount.new!()
+  |> ExMonty.Mount.add!("/data",    "/var/lib/myapp/data",    :read_only)
+  |> ExMonty.Mount.add!("/scratch", "/tmp/sandbox-scratch",   :overlay)
+  |> ExMonty.Mount.add!("/output",  "/var/lib/myapp/output",  :read_write,
+       write_bytes_limit: 10_000_000)
+
+ExMonty.Sandbox.run(code, mounts: mounts)
+```
+
+### Modes
+
+| Mode          | Reads               | Writes                                  |
+|---------------|---------------------|-----------------------------------------|
+| `:read_only`  | pass through to host | raise `PermissionError`                 |
+| `:read_write` | pass through to host | hit the host disk **(footgun, see below)** |
+| `:overlay`    | pass through to host | captured in-memory; host untouched      |
+
+### Examples
+
+**Read-only access to a data directory:**
+
+```elixir
+mounts = ExMonty.Mount.new!() |> ExMonty.Mount.add!("/data", "/var/lib/myapp/data", :read_only)
+
+code = """
+from pathlib import Path
+Path("/data/users.csv").read_text()
+"""
+
+{:ok, csv, _} = ExMonty.Sandbox.run(code, mounts: mounts)
+```
+
+**Overlay (sandbox writes are ephemeral):**
+
+```elixir
+mounts = ExMonty.Mount.new!() |> ExMonty.Mount.add!("/scratch", "/tmp/work", :overlay)
+
+# Sandbox writes go into in-memory overlay storage on the mount object,
+# not to /tmp/work. The host directory stays untouched.
+code = """
+from pathlib import Path
+Path("/scratch/intermediate.json").write_text("{}")
+Path("/scratch/intermediate.json").read_text()
+"""
+
+{:ok, _, _} = ExMonty.Sandbox.run(code, mounts: mounts)
+```
+
+Overlay state **persists across runs against the same mount object**.
+Construct a fresh mount to discard accumulated overlay writes.
+
+**Compose mounts with `:os` fallbacks** (mounts handle FS calls; the
+`:os` map handles non-FS calls like `getenv` and `datetime_now`):
+
+```elixir
+ExMonty.Sandbox.run(code,
+  mounts: mounts,
+  os: %{
+    getenv:       fn _args, _kwargs -> {:ok, "from-host"} end,
+    datetime_now: fn _args, _kwargs -> {:ok, fixed_datetime()} end
+  }
+)
+```
+
+### Unmounted paths
+
+Filesystem operations on paths that don't fall under any mount raise
+`PermissionError`:
+
+```python
+Path("/etc/passwd").read_text()
+# PermissionError: Permission denied: '/etc/passwd'
+```
+
+This is upstream monty's `OsFunction::on_no_handler` behaviour for
+filesystem operations. Non-filesystem operations (like `os.getenv`) raise
+`RuntimeError` if no fallback handler is configured.
+
+### Cumulative limits
+
+`write_bytes_limit` is **cumulative on the mount object**, not per-run:
+
+```elixir
+mounts = ExMonty.Mount.new!() |> ExMonty.Mount.add!("/o", tmp, :overlay, write_bytes_limit: 16)
+
+ExMonty.Sandbox.run(write_10_bytes, mounts: mounts)  # OK: 10/16 used
+ExMonty.Sandbox.run(write_10_bytes, mounts: mounts)  # FAILS: 20 > 16
+```
+
+Construct a fresh mount to reset the counter.
+
+### Concurrency
+
+A mount can only serve one run at a time. Calling `Sandbox.run` against
+a mount that's already in a run returns `{:error, :mount_in_use}`. If
+you need parallel runs with the same host directory, create separate
+mount objects.
+
+### `:read_write` is a footgun
+
+Sandbox code in `:read_write` mode can modify real host files. Use
+sparingly. Most sandboxed-execution use cases want `:read_only` (provide
+data) or `:overlay` (let the sandbox scribble freely without touching
+disk).
+
 ## Resource Limits
 
 Control memory, execution time, allocations, and recursion depth:

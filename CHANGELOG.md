@@ -4,6 +4,30 @@
 
 ### New ExMonty Features
 
+- **`ExMonty.Mount` — host filesystem mounts.** Map virtual paths in the
+  sandbox to real host directories with `:read_only`, `:read_write`, or
+  `:overlay` access modes. Path canonicalisation, boundary checks, and
+  symlink-escape detection are always enforced.
+
+  ```elixir
+  mounts =
+    ExMonty.Mount.new!()
+    |> ExMonty.Mount.add!("/data",    "/var/lib/myapp/data", :read_only)
+    |> ExMonty.Mount.add!("/scratch", "/tmp/sandbox-scratch", :overlay)
+
+  ExMonty.Sandbox.run(code, mounts: mounts)
+  ```
+
+  Composes with the existing `:os` option — mounts handle FS calls; the
+  `:os` map handles non-FS fallbacks (`:getenv`, `:datetime_now`, etc.).
+  Unmounted paths raise `PermissionError` (upstream's
+  `OsFunction::on_no_handler` semantics) instead of ExMonty's previous
+  generic `:os_error`.
+
+  Mount state (overlay writes, `write_bytes_used` counter) is cumulative
+  on the mount object across runs. Construct a fresh mount to discard.
+  See `proposals/MOUNT_TABLE.md` for the design rationale.
+
 - **`datetime` support.** `date`, `datetime`, `timedelta`, and `timezone`
   Python values round-trip via new tagged tuples:
 

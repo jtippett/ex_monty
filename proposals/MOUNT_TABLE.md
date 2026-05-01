@@ -1,8 +1,19 @@
 # Proposal: `ExMonty.Mount` — host filesystem mounts in the sandbox
 
-**Status:** Final draft, revision 4 (ready to implement)
+**Status:** Implemented — see commits `5ea074f` and `eb04351`
 **Author:** James Tippett
 **Target:** ExMonty v0.4 (post-v0.0.17 update)
+
+> **Implementation notes (post-merge):**
+> - **`list/1` is permissive in v1.** Upstream `MountTable` keeps its
+>   inner `Vec<Mount>` private and exposes no public iter/get accessor,
+>   so `write_bytes_used` per-mount can't be surfaced without an upstream
+>   API addition. v1 returns descriptor-only state (virtual / host / mode /
+>   `write_bytes_limit`); the `write_bytes_used` field is deferred until
+>   upstream provides a getter. With no live state to surface, `list/1`
+>   is permissive under lease — it reads from the descriptor side-channel
+>   like `count/1`. The original §4 lease-consistency table is corrected
+>   to reflect this.
 
 > **Revision 4 changes (final review pass):**
 > - `count/1` is **permissive under lease.** Mount count and lightweight

@@ -73,6 +73,22 @@ defmodule ExMonty.Sandbox do
         }
       )
 
+  ## Host Filesystem Mounts
+
+  For sandboxed access to real host directories, pass an `ExMonty.Mount`
+  as the `:mounts` option:
+
+      mounts =
+        ExMonty.Mount.new!()
+        |> ExMonty.Mount.add!("/data", "/var/lib/myapp/data", :read_only)
+
+      ExMonty.Sandbox.run(code, mounts: mounts)
+
+  `:mounts` composes with `:os` — mounts handle filesystem calls, the
+  `:os` map handles non-filesystem fallbacks (`:getenv`,
+  `:datetime_now`, etc.). See `ExMonty.Mount` for mode semantics, lease
+  lifecycle, and security guarantees.
+
   ## Pseudo Filesystem
 
   Pass an `ExMonty.PseudoFS` as the `:os` option for sandboxed filesystem access:
@@ -124,6 +140,10 @@ defmodule ExMonty.Sandbox do
     * `:os` - OS call handler. Can be:
       * An `ExMonty.PseudoFS` struct for in-memory filesystem
       * A map of `%{atom => fn args, kwargs -> result}` for per-function handlers
+    * `:mounts` - an `ExMonty.Mount` for host filesystem access. Composes
+      with `:os` (mounts handle FS calls; `:os` map handles non-FS fallback
+      calls like `:getenv` or `:datetime_now`). Unmounted paths raise
+      `PermissionError`.
     * `:limits` - resource limits map (default: `nil`)
     * `:script_name` - script name for tracebacks (default: `"main.py"`)
 
