@@ -1,6 +1,6 @@
 use monty::{
-    DictPairs, MontyDate, MontyDateTime, MontyObject, MontyTimeDelta, MontyTimeZone, OsFunction,
-    ResourceLimits,
+    DictPairs, FileMode, MontyDate, MontyDateTime, MontyFileHandle, MontyObject, MontyTimeDelta,
+    MontyTimeZone, OsFunctionCall, ResourceLimits,
 };
 use num_bigint::BigInt;
 use rustler::types::atom::Atom;
@@ -64,6 +64,26 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
         MontyObject::Path(p) => {
             let tag = Atom::from_str(env, "path").unwrap();
             rustler::types::tuple::make_tuple(env, &[tag.encode(env), p.encode(env)])
+        }
+        MontyObject::FileHandle(handle) => {
+            let tag = Atom::from_str(env, "file_handle").unwrap();
+            let map = rustler::types::map::map_new(env)
+                .map_put(
+                    Atom::from_str(env, "path").unwrap().encode(env),
+                    handle.path.encode(env),
+                )
+                .unwrap()
+                .map_put(
+                    Atom::from_str(env, "mode").unwrap().encode(env),
+                    handle.mode.as_str().encode(env),
+                )
+                .unwrap()
+                .map_put(
+                    Atom::from_str(env, "position").unwrap().encode(env),
+                    handle.position.encode(env),
+                )
+                .unwrap();
+            rustler::types::tuple::make_tuple(env, &[tag.encode(env), map])
         }
         MontyObject::NamedTuple {
             type_name,
@@ -414,6 +434,12 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                         let path: String = elements[1].decode()?;
                         return Ok(MontyObject::Path(path));
                     }
+                    "file_handle" => {
+                        return Ok(MontyObject::FileHandle(decode_file_handle(
+                            env,
+                            elements[1],
+                        )?));
+                    }
                     "repr" => {
                         let repr: String = elements[1].decode()?;
                         return Ok(MontyObject::Repr(repr));
@@ -666,28 +692,32 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
     Ok(limits)
 }
 
-pub fn encode_os_function<'a>(env: Env<'a>, func: &OsFunction) -> Term<'a> {
+pub fn encode_os_function<'a>(env: Env<'a>, func: &OsFunctionCall) -> Term<'a> {
     let name = match func {
-        OsFunction::Exists => "exists",
-        OsFunction::IsFile => "is_file",
-        OsFunction::IsDir => "is_dir",
-        OsFunction::IsSymlink => "is_symlink",
-        OsFunction::ReadText => "read_text",
-        OsFunction::ReadBytes => "read_bytes",
-        OsFunction::WriteText => "write_text",
-        OsFunction::WriteBytes => "write_bytes",
-        OsFunction::Mkdir => "mkdir",
-        OsFunction::Unlink => "unlink",
-        OsFunction::Rmdir => "rmdir",
-        OsFunction::Iterdir => "iterdir",
-        OsFunction::Stat => "stat",
-        OsFunction::Rename => "rename",
-        OsFunction::Resolve => "resolve",
-        OsFunction::Absolute => "absolute",
-        OsFunction::Getenv => "getenv",
-        OsFunction::GetEnviron => "get_environ",
-        OsFunction::DateToday => "date_today",
-        OsFunction::DateTimeNow => "datetime_now",
+        OsFunctionCall::Exists(_) => "exists",
+        OsFunctionCall::IsFile(_) => "is_file",
+        OsFunctionCall::IsDir(_) => "is_dir",
+        OsFunctionCall::IsSymlink(_) => "is_symlink",
+        OsFunctionCall::ReadText(_) => "read_text",
+        OsFunctionCall::ReadBytes(_) => "read_bytes",
+        OsFunctionCall::WriteText(_) => "write_text",
+        OsFunctionCall::WriteBytes(_) => "write_bytes",
+        OsFunctionCall::AppendText(_) => "append_text",
+        OsFunctionCall::AppendBytes(_) => "append_bytes",
+        OsFunctionCall::Open(_) => "open",
+        OsFunctionCall::Mkdir(_) => "mkdir",
+        OsFunctionCall::Unlink(_) => "unlink",
+        OsFunctionCall::Rmdir(_) => "rmdir",
+        OsFunctionCall::Iterdir(_) => "iterdir",
+        OsFunctionCall::Stat(_) => "stat",
+        OsFunctionCall::Rename(_) => "rename",
+        OsFunctionCall::Resolve(_) => "resolve",
+        OsFunctionCall::Absolute(_) => "absolute",
+        OsFunctionCall::Getenv(_) => "getenv",
+        OsFunctionCall::GetEnviron => "get_environ",
+        OsFunctionCall::DateToday => "date_today",
+        OsFunctionCall::DateTimeNow(_) => "datetime_now",
+        OsFunctionCall::Used => "used",
     };
     Atom::from_str(env, name).unwrap().encode(env)
 }
@@ -739,6 +769,25 @@ fn decode_date_fields<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyDate> 
         year: map_get_atom(env, term, "year")?.decode()?,
         month: map_get_atom(env, term, "month")?.decode()?,
         day: map_get_atom(env, term, "day")?.decode()?,
+    })
+}
+
+fn decode_file_handle<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyFileHandle> {
+    use std::str::FromStr;
+    if !term.is_map() {
+        return Err(rustler::Error::BadArg);
+    }
+    let path: String = map_get_atom(env, term, "path")?.decode()?;
+    let mode_str: String = map_get_atom(env, term, "mode")?.decode()?;
+    let mode = FileMode::from_str(&mode_str).map_err(|_| rustler::Error::BadArg)?;
+    let position: u64 = match map_get_atom(env, term, "position") {
+        Ok(t) => t.decode().unwrap_or(0),
+        Err(_) => 0,
+    };
+    Ok(MontyFileHandle {
+        path,
+        mode,
+        position,
     })
 }
 

@@ -8,8 +8,13 @@ defmodule ExMonty.OsCall do
   ## Fields
 
     * `:function` - the OS function as an atom (e.g., `:read_text`, `:exists`,
-      `:write_text`, `:getenv`, `:get_environ`, `:date_today`, `:datetime_now`)
-    * `:args` - list of positional arguments
+      `:write_text`, `:append_text`, `:open`, `:getenv`, `:get_environ`,
+      `:date_today`, `:datetime_now`)
+    * `:args` - list of positional arguments. For `:open`, this is
+      `[{:path, path}, mode]` where `mode` is a Python mode string (`"r"`,
+      `"w"`, `"a"`, `"rb"`, ...). A handler servicing `:open` returns a
+      `{:file_handle, %{path: path, mode: mode, position: pos}}` value.
+    * `:kwargs` - map of keyword arguments
     * `:kwargs` - map of keyword arguments
     * `:call_id` - unique identifier for this call within the execution
   """

@@ -4,6 +4,14 @@
 
 ### New ExMonty Features
 
+- **Buffered `open()` builtin and file handles.** Python `open(path, mode)`
+  (with context-manager `with` support, `read`/`write`, and `a`/`w`/`r`
+  modes) now works against `:read_write` and `:overlay` mounts. File objects
+  round-trip as a new `{:file_handle, %{path, mode, position}}` tagged value,
+  and three new os calls — `:open`, `:append_text`, `:append_bytes` — are
+  dispatchable through `Sandbox` `os:` handler maps. `PseudoFS` does not yet
+  service `:open` (returns `NotImplementedError`); use a mount for file I/O.
+
 - **`ExMonty.Mount` — host filesystem mounts.** Map virtual paths in the
   sandbox to real host directories with `:read_only`, `:read_write`, or
   `:overlay` access modes. Path canonicalisation, boundary checks, and
@@ -62,11 +70,15 @@
   `:datetime_now` keys in `os:` handler maps (previously they were silently
   dropped).
 
-### Upstream Python Features (monty v0.0.8 → v0.0.17)
+### Upstream Python Features (monty v0.0.8 → v0.0.18)
 
 These come from upstream and don't change the ExMonty API — but they affect
 what Python code you can run:
 
+- **`open()` builtin** (v0.0.18). `with open(...) as f:`, buffered read/write,
+  file objects. The `with` statement works for built-in context managers like
+  `open()`; user-defined `__enter__`/`__exit__` classes are still unsupported
+  (no class definitions). See "Buffered `open()`" above.
 - **`json` module.** `import json; json.loads(...) / json.dumps(...)`.
 - **`datetime` module.** `date`, `datetime`, `timedelta`, `timezone` (see above).
 - **Multi-module imports.** `import a, b, c` in one statement.
@@ -83,6 +95,11 @@ what Python code you can run:
   partial future-resolution panic in mixed gathers, GC interval ignored in
   tracker, GC reference release in cycles, empty-tuple singleton counted
   against memory limit.
+- **More hardening** (v0.0.18): trial-deletion cycle GC, duplicate-parameter
+  and duplicate-coroutine panics, exception-stack corruption on `raise`,
+  further integer-op panics, comprehension generator/AST depth limits, and
+  JSON BigInt limits — all converted from panics to proper exceptions or
+  bounded errors.
 
 ### Not Yet Exposed to Elixir
 
@@ -94,8 +111,13 @@ what Python code you can run:
 
 ### Internal
 
-- **monty pinned to v0.0.17** (commit `5c7cf2b6`). Update procedure now tracks
+- **monty pinned to v0.0.18** (commit `45a3b2d5`). Update procedure now tracks
   tagged releases by default; see `UPDATE_PROCEDURE.md`.
+- **Upstream `OsFunction` → `OsFunctionCall` refactor absorbed.** The os-call
+  surface now carries typed args inline; our NIF extracts the
+  `(positional, keyword)` view via `OsFunctionCall::to_args` and routes mount
+  calls through the new `MountTable::handle_os_call(&call)` signature. No
+  Elixir-side API change beyond the new `:open`/`:append_*` os atoms.
 - **`PrintWriter::Collect` renamed to `PrintWriter::CollectString`** in monty
   upstream — internal NIF change only, no Elixir-side impact.
 

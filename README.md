@@ -176,6 +176,9 @@ Path('/output/result.txt').read_text()
 | `Path.read_bytes()`       | `:read_bytes` | Read file as bytes             |
 | `Path.write_text(data)`   | `:write_text` | Write string to file           |
 | `Path.write_bytes(data)`  | `:write_bytes`| Write bytes to file            |
+| append text               | `:append_text`| Append string to file          |
+| append bytes              | `:append_bytes`| Append bytes to file          |
+| `open(path, mode)`        | `:open`       | Open a file; args `[{:path, path}, mode]`, returns a `{:file_handle, ...}` |
 | `Path.mkdir()`            | `:mkdir`      | Create directory               |
 | `Path.unlink()`           | `:unlink`     | Delete file                    |
 | `Path.rmdir()`            | `:rmdir`      | Delete empty directory         |
@@ -508,6 +511,7 @@ int("1" * 5000)
 | `set` / `frozenset` | `MapSet`                        |                                        |
 | `...` (Ellipsis)    | `:ellipsis`                     |                                        |
 | `Path`              | `{:path, string}`               |                                        |
+| file object (`open()`) | `{:file_handle, %{path, mode, position}}` | `mode` is a Python mode string (`"r"`, `"wb"`, ...); produced by `open()` and accepted back from an `:open` os handler |
 | `NamedTuple`        | `{:named_tuple, type_name, fields}` | `type_name` is a string; `fields` is an ordered list of `{field_name, value}` pairs |
 | `@dataclass`        | `%ExMonty.Dataclass{}`          | `fields` keys are strings              |
 | `datetime.date`     | `{:date, %{year, month, day}}`  | Output-only today                       |
