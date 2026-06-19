@@ -137,8 +137,10 @@ fn encode_run_progress<'a>(
         }
         RunProgress::OsCall(call) => {
             let tag = Atom::from_str(env, "os_call").unwrap();
-            let call_term =
-                encode_os_call(env, &call.function, &call.args, &call.kwargs, call.call_id);
+            // `to_args` consumes the call value, so clone it for the Elixir-facing
+            // view and keep the original in the snapshot for resume/on_no_handler.
+            let (args, kwargs) = call.function_call.clone().to_args();
+            let call_term = encode_os_call(env, &call.function_call, &args, &kwargs, call.call_id);
             let snapshot_ref = ResourceArc::new(SnapshotResource::new(SnapshotKind::OsCall(call)));
             Ok(rustler::types::tuple::make_tuple(
                 env,
@@ -229,7 +231,7 @@ fn encode_function_call<'a>(
 
 fn encode_os_call<'a>(
     env: Env<'a>,
-    function: &monty::OsFunction,
+    function: &monty::OsFunctionCall,
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
     call_id: u32,
@@ -431,7 +433,7 @@ fn resume_with_mounts<'a>(
     // before resuming. For other snapshot kinds, decode normally.
     let initial_progress = match snap {
         SnapshotKind::OsCall(call) if is_no_handler_atom(result) => {
-            let exc = call.function.on_no_handler(&call.args);
+            let exc = call.function_call.on_no_handler();
             call.resume(ExtFunctionResult::Error(exc), print)
         }
         SnapshotKind::OsCall(call) => {
@@ -526,7 +528,7 @@ fn drive_with_mounts(
     loop {
         match current {
             RunProgress::OsCall(call) => {
-                match table.handle_os_call(call.function, &call.args, &call.kwargs) {
+                match table.handle_os_call(&call.function_call) {
                     Some(Ok(obj)) => {
                         let print = PrintWriter::CollectString(output);
                         current = call.resume(ExtFunctionResult::Return(obj), print)?;
