@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.4.0
+
 ### New ExMonty Features
 
 - **Buffered `open()` builtin and file handles.** Python `open(path, mode)`
