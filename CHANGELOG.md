@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.4.1 - 2026-06-20
+
 ## 0.4.0
 
 ### New ExMonty Features
