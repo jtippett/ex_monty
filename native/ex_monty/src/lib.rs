@@ -5,7 +5,7 @@ mod resources;
 mod serialization;
 mod types;
 
-use monty::{LimitedTracker, PrintWriter, ResourceLimits};
+use monty::{LimitedTracker, PrintWriter};
 use resources::RunnerResource;
 use rustler::{Encoder, Env, NifResult, ResourceArc, Term};
 
@@ -45,34 +45,7 @@ fn run<'a>(
         )
         .map_err(error::monty_exception_to_rustler_error)?;
 
-    let result_term = types::encode_monty_object(env, &result);
-    let output_term = output.encode(env);
-    Ok(rustler::types::tuple::make_tuple(
-        env,
-        &[result_term, output_term],
-    ))
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn run_no_limits<'a>(
-    env: Env<'a>,
-    runner: ResourceArc<RunnerResource>,
-    inputs: Vec<(String, Term<'a>)>,
-) -> NifResult<Term<'a>> {
-    let runner_ref = runner.runner();
-    let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
-    let mut output = String::new();
-    let tracker = LimitedTracker::new(ResourceLimits::new());
-
-    let result = runner_ref
-        .run(
-            monty_inputs,
-            tracker,
-            PrintWriter::CollectString(&mut output),
-        )
-        .map_err(error::monty_exception_to_rustler_error)?;
-
-    let result_term = types::encode_monty_object(env, &result);
+    let result_term = types::encode_monty_object(env, &result)?;
     let output_term = output.encode(env);
     Ok(rustler::types::tuple::make_tuple(
         env,

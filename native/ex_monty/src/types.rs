@@ -10,10 +10,46 @@ use rustler::{Encoder, Env, NifResult, Term};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
+/// Maximum nesting depth when converting `MontyObject` <-> Erlang term.
+///
+/// `encode_monty_object`/`decode_monty_object` recurse for every nested
+/// container, and the resulting nested `MontyObject` tree is also *dropped*
+/// recursively. A deeply-nested value — which untrusted Monty code can build
+/// iteratively (`x = []; for _ in range(n): x = [x]`) well past Monty's own
+/// recursion limit — would overflow the (small) dirty-scheduler native stack
+/// during traversal or drop, and a stack overflow inside a NIF aborts the
+/// **entire BEAM** (it is NOT catchable by Rustler's panic boundary). So we
+/// reject anything deeper than this with a clean error before such a tree is
+/// ever built. 64 is far beyond any legitimate data nesting yet leaves a large
+/// safety margin below the empirically observed overflow point (~150+ frames),
+/// including headroom for the unguarded recursive `Drop` and for smaller
+/// scheduler stacks on other platforms.
+const MAX_NESTING_DEPTH: usize = 64;
+
+/// Maximum magnitude length (bytes) accepted for a `{:__bigint__, sign, bytes}`
+/// tagged tuple. 1 KiB is ~2466 decimal digits — beyond any legitimate integer
+/// — and caps allocation from a malicious callback payload.
+const MAX_BIGINT_BYTES: usize = 1024;
+
+fn nesting_error() -> rustler::Error {
+    rustler::Error::Term(Box::new("value nesting exceeds ExMonty MAX_NESTING_DEPTH"))
+}
+
 // ── Encoding: MontyObject → Erlang Term ──────────────────────────────────────
 
-pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
-    match obj {
+pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> NifResult<Term<'a>> {
+    encode_monty_object_depth(env, obj, 0)
+}
+
+fn encode_monty_object_depth<'a>(
+    env: Env<'a>,
+    obj: &MontyObject,
+    depth: usize,
+) -> NifResult<Term<'a>> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(nesting_error());
+    }
+    let term = match obj {
         MontyObject::None => rustler::types::atom::nil().encode(env),
         MontyObject::Bool(b) => b.encode(env),
         MontyObject::Int(i) => i.encode(env),
@@ -34,31 +70,42 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
         MontyObject::String(s) => s.encode(env),
         MontyObject::Bytes(b) => {
             let tag = Atom::from_str(env, "bytes").unwrap();
-            let mut owned = rustler::OwnedBinary::new(b.len()).unwrap();
+            let mut owned = rustler::OwnedBinary::new(b.len()).ok_or_else(|| {
+                rustler::Error::Term(Box::new("failed to allocate binary for bytes value"))
+            })?;
             owned.as_mut_slice().copy_from_slice(b);
             let binary = owned.release(env);
             rustler::types::tuple::make_tuple(env, &[tag.encode(env), binary.encode(env)])
         }
         MontyObject::Ellipsis => Atom::from_str(env, "ellipsis").unwrap().encode(env),
         MontyObject::List(items) => {
-            let terms: Vec<Term> = items.iter().map(|i| encode_monty_object(env, i)).collect();
+            let terms: Vec<Term> = items
+                .iter()
+                .map(|i| encode_monty_object_depth(env, i, depth + 1))
+                .collect::<NifResult<Vec<_>>>()?;
             terms.encode(env)
         }
         MontyObject::Tuple(items) => {
-            let terms: Vec<Term> = items.iter().map(|i| encode_monty_object(env, i)).collect();
+            let terms: Vec<Term> = items
+                .iter()
+                .map(|i| encode_monty_object_depth(env, i, depth + 1))
+                .collect::<NifResult<Vec<_>>>()?;
             rustler::types::tuple::make_tuple(env, &terms)
         }
         MontyObject::Dict(pairs) => {
             let mut map = rustler::types::map::map_new(env);
             for (k, v) in pairs {
-                let key = encode_monty_object(env, k);
-                let val = encode_monty_object(env, v);
+                let key = encode_monty_object_depth(env, k, depth + 1)?;
+                let val = encode_monty_object_depth(env, v, depth + 1)?;
                 map = map.map_put(key, val).unwrap();
             }
             map
         }
         MontyObject::Set(items) | MontyObject::FrozenSet(items) => {
-            let members: Vec<Term> = items.iter().map(|i| encode_monty_object(env, i)).collect();
+            let members: Vec<Term> = items
+                .iter()
+                .map(|i| encode_monty_object_depth(env, i, depth + 1))
+                .collect::<NifResult<Vec<_>>>()?;
             encode_mapset(env, &members)
         }
         MontyObject::Path(p) => {
@@ -97,10 +144,10 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
                 .zip(values.iter())
                 .map(|(fname, val)| {
                     let key = fname.encode(env);
-                    let value = encode_monty_object(env, val);
-                    rustler::types::tuple::make_tuple(env, &[key, value])
+                    let value = encode_monty_object_depth(env, val, depth + 1)?;
+                    Ok(rustler::types::tuple::make_tuple(env, &[key, value]))
                 })
-                .collect();
+                .collect::<NifResult<Vec<_>>>()?;
 
             rustler::types::tuple::make_tuple(
                 env,
@@ -129,7 +176,7 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
             for fname in field_names {
                 if let Some(val) = attr_map.get(fname) {
                     let key = fname.encode(env);
-                    let value = encode_monty_object(env, val);
+                    let value = encode_monty_object_depth(env, val, depth + 1)?;
                     fields_map = fields_map.map_put(key, value).unwrap();
                 }
             }
@@ -222,7 +269,8 @@ pub fn encode_monty_object<'a>(env: Env<'a>, obj: &MontyObject) -> Term<'a> {
         MontyObject::DateTime(dt) => encode_datetime(env, dt),
         MontyObject::TimeDelta(td) => encode_timedelta(env, td),
         MontyObject::TimeZone(tz) => encode_timezone(env, tz),
-    }
+    };
+    Ok(term)
 }
 
 fn encode_date<'a>(env: Env<'a>, d: &MontyDate) -> Term<'a> {
@@ -371,6 +419,17 @@ const STAT_RESULT_FIELD_ORDER: [&str; 10] = [
 // ── Decoding: Erlang Term → MontyObject ──────────────────────────────────────
 
 pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyObject> {
+    decode_monty_object_depth(env, term, 0)
+}
+
+fn decode_monty_object_depth<'a>(
+    env: Env<'a>,
+    term: Term<'a>,
+    depth: usize,
+) -> NifResult<MontyObject> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(nesting_error());
+    }
     // nil, true, false, ellipsis atoms
     if term.is_atom() {
         let atom_str: String = term.atom_to_string().map_err(|_| rustler::Error::BadArg)?;
@@ -418,7 +477,7 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
         if elements.len() == 3 {
             if let Ok(tag) = elements[0].atom_to_string() {
                 if tag == "named_tuple" {
-                    return decode_named_tuple(env, elements[1], elements[2]);
+                    return decode_named_tuple(env, elements[1], elements[2], depth);
                 }
             }
         }
@@ -503,12 +562,32 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                 if tag == "__bigint__" {
                     let sign: i32 = elements[1].decode()?;
                     let binary: rustler::Binary = elements[2].decode()?;
+                    let bytes = binary.as_slice();
+                    if bytes.len() > MAX_BIGINT_BYTES {
+                        return Err(rustler::Error::Term(Box::new(
+                            "bigint magnitude exceeds ExMonty MAX_BIGINT_BYTES",
+                        )));
+                    }
                     let num_sign = match sign {
                         -1 => num_bigint::Sign::Minus,
                         0 => num_bigint::Sign::NoSign,
-                        _ => num_bigint::Sign::Plus,
+                        1 => num_bigint::Sign::Plus,
+                        _ => {
+                            return Err(rustler::Error::Term(Box::new(
+                                "bigint sign must be -1, 0, or 1",
+                            )))
+                        }
                     };
-                    let bi = BigInt::from_bytes_be(num_sign, binary.as_slice());
+                    // Enforce canonical form: sign 0 iff magnitude is zero. This
+                    // keeps the only foreign-controlled integer encoding total and
+                    // unambiguous instead of silently coercing junk.
+                    let magnitude_is_zero = bytes.iter().all(|&b| b == 0);
+                    if (num_sign == num_bigint::Sign::NoSign) != magnitude_is_zero {
+                        return Err(rustler::Error::Term(Box::new(
+                            "bigint sign 0 must have zero magnitude and vice versa",
+                        )));
+                    }
+                    let bi = BigInt::from_bytes_be(num_sign, bytes);
                     return Ok(MontyObject::BigInt(bi));
                 }
             }
@@ -516,7 +595,7 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
         // Regular tuple
         let items: Vec<MontyObject> = elements
             .iter()
-            .map(|t| decode_monty_object(env, *t))
+            .map(|t| decode_monty_object_depth(env, *t, depth + 1))
             .collect::<NifResult<Vec<_>>>()?;
         return Ok(MontyObject::Tuple(items));
     }
@@ -526,7 +605,7 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
         let list: Vec<Term> = term.decode()?;
         let items: Vec<MontyObject> = list
             .into_iter()
-            .map(|t| decode_monty_object(env, t))
+            .map(|t| decode_monty_object_depth(env, t, depth + 1))
             .collect::<NifResult<Vec<_>>>()?;
         return Ok(MontyObject::List(items));
     }
@@ -541,12 +620,12 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
                     let inner_map = term.map_get(map_key).map_err(|_| rustler::Error::BadArg)?;
                     let iter = MapIterator::new(inner_map).ok_or(rustler::Error::BadArg)?;
                     let items: Vec<MontyObject> = iter
-                        .map(|(k, _v)| decode_monty_object(env, k))
+                        .map(|(k, _v)| decode_monty_object_depth(env, k, depth + 1))
                         .collect::<NifResult<Vec<_>>>()?;
                     return Ok(MontyObject::Set(items));
                 }
                 if struct_name == "Elixir.ExMonty.Dataclass" {
-                    return decode_dataclass(env, term);
+                    return decode_dataclass(env, term, depth);
                 }
             }
         }
@@ -554,8 +633,8 @@ pub fn decode_monty_object<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyO
         let iter = MapIterator::new(term).ok_or(rustler::Error::BadArg)?;
         let pairs: Vec<(MontyObject, MontyObject)> = iter
             .map(|(k, v)| {
-                let key = decode_monty_object(env, k)?;
-                let val = decode_monty_object(env, v)?;
+                let key = decode_monty_object_depth(env, k, depth + 1)?;
+                let val = decode_monty_object_depth(env, v, depth + 1)?;
                 Ok((key, val))
             })
             .collect::<NifResult<Vec<_>>>()?;
@@ -640,21 +719,28 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
     if term.is_atom() {
         let s = term.atom_to_string().map_err(|_| rustler::Error::BadArg)?;
         if s == "nil" {
-            return Ok(ResourceLimits::new());
+            return Ok(cap_recursion_depth(ResourceLimits::new()));
         }
     }
 
     if !term.is_map() {
-        return Err(rustler::Error::BadArg);
+        // Use a descriptive Term error (not BadArg) so it surfaces through the
+        // Elixir wrappers as a clean `{:error, _}` rather than an ArgumentError.
+        return Err(rustler::Error::Term(Box::new(
+            "limits must be a map, nil, or :unlimited",
+        )));
     }
 
     let mut limits = ResourceLimits::new();
     let env = term.get_env();
 
+    // A *present* limit key with a malformed value is rejected, not silently
+    // dropped: silently ignoring it would degrade the limit to "unlimited" and
+    // quietly weaken the sandbox. Absent keys keep their `ResourceLimits::new`
+    // default.
     if let Ok(val) = term.map_get(Atom::from_str(env, "max_allocations").unwrap().encode(env)) {
-        if let Ok(n) = val.decode::<usize>() {
-            limits = limits.max_allocations(n);
-        }
+        let n: usize = val.decode().map_err(|_| invalid_limit("max_allocations"))?;
+        limits = limits.max_allocations(n);
     }
 
     if let Ok(val) = term.map_get(
@@ -662,21 +748,25 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
             .unwrap()
             .encode(env),
     ) {
-        if let Ok(secs) = val.decode::<f64>() {
-            limits = limits.max_duration(Duration::from_secs_f64(secs));
-        }
+        let secs: f64 = val
+            .decode()
+            .map_err(|_| invalid_limit("max_duration_secs"))?;
+        // `Duration::from_secs_f64` panics on negative / NaN / non-finite /
+        // overflowing input; the fallible form turns that into a clean error
+        // instead of a (caught) NIF panic.
+        let duration =
+            Duration::try_from_secs_f64(secs).map_err(|_| invalid_limit("max_duration_secs"))?;
+        limits = limits.max_duration(duration);
     }
 
     if let Ok(val) = term.map_get(Atom::from_str(env, "max_memory").unwrap().encode(env)) {
-        if let Ok(n) = val.decode::<usize>() {
-            limits = limits.max_memory(n);
-        }
+        let n: usize = val.decode().map_err(|_| invalid_limit("max_memory"))?;
+        limits = limits.max_memory(n);
     }
 
     if let Ok(val) = term.map_get(Atom::from_str(env, "gc_interval").unwrap().encode(env)) {
-        if let Ok(n) = val.decode::<usize>() {
-            limits = limits.gc_interval(n);
-        }
+        let n: usize = val.decode().map_err(|_| invalid_limit("gc_interval"))?;
+        limits = limits.gc_interval(n);
     }
 
     if let Ok(val) = term.map_get(
@@ -684,12 +774,48 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
             .unwrap()
             .encode(env),
     ) {
-        if let Ok(n) = val.decode::<usize>() {
-            limits = limits.max_recursion_depth(Some(n));
-        }
+        let n: usize = val
+            .decode()
+            .map_err(|_| invalid_limit("max_recursion_depth"))?;
+        limits = limits.max_recursion_depth(Some(n));
     }
 
-    Ok(limits)
+    Ok(cap_recursion_depth(limits))
+}
+
+/// Hard upper bound on the recursion depth Monty is allowed, enforced here in
+/// the NIF so it cannot be bypassed by calling `ExMonty.Native.*` directly or
+/// by passing `nil`/a huge value. Monty converts a returned value to its output
+/// representation recursively and that nested `MontyObject` is dropped
+/// recursively on a small dirty-scheduler stack; allowing Monty to build one
+/// deeper than a few hundred levels would overflow that stack and abort the
+/// whole BEAM. Kept well below the empirically observed ~325-level overflow,
+/// with margin for smaller scheduler stacks on other platforms.
+const SAFE_MAX_RECURSION_DEPTH: usize = 128;
+
+fn cap_recursion_depth(mut limits: ResourceLimits) -> ResourceLimits {
+    let capped = match limits.max_recursion_depth {
+        Some(d) => d.min(SAFE_MAX_RECURSION_DEPTH),
+        // `None` would mean unbounded recursion — never allowed.
+        None => SAFE_MAX_RECURSION_DEPTH,
+    };
+    limits.max_recursion_depth = Some(capped);
+    limits
+}
+
+fn invalid_limit(key: &str) -> rustler::Error {
+    rustler::Error::Term(Box::new(format!("invalid resource limit value for {key}")))
+}
+
+fn invalid_dataclass(msg: &'static str) -> rustler::Error {
+    rustler::Error::Term(Box::new(format!("invalid dataclass: {msg}")))
+}
+
+/// True only for the literal `nil` atom (an explicitly-unset optional field),
+/// not for arbitrary atoms — so a malformed atom value is rejected rather than
+/// silently treated as "unset".
+fn is_nil_atom(term: Term) -> bool {
+    term.is_atom() && matches!(term.atom_to_string().as_deref(), Ok("nil"))
 }
 
 pub fn encode_os_function<'a>(env: Env<'a>, func: &OsFunctionCall) -> Term<'a> {
@@ -833,6 +959,7 @@ fn decode_named_tuple<'a>(
     env: Env<'a>,
     type_term: Term<'a>,
     fields_term: Term<'a>,
+    depth: usize,
 ) -> NifResult<MontyObject> {
     let raw_type_name: String = if type_term.is_atom() {
         type_term
@@ -868,7 +995,7 @@ fn decode_named_tuple<'a>(
                 return Err(rustler::Error::BadArg);
             };
 
-            let value = decode_monty_object(env, elems[1])?;
+            let value = decode_monty_object_depth(env, elems[1], depth + 1)?;
             field_names.push(field_name);
             values.push(value);
         }
@@ -893,7 +1020,7 @@ fn decode_named_tuple<'a>(
                 return Err(rustler::Error::BadArg);
             };
 
-            let value = decode_monty_object(env, v)?;
+            let value = decode_monty_object_depth(env, v, depth + 1)?;
             by_name.insert(field_name, value);
         }
 
@@ -909,32 +1036,33 @@ fn decode_named_tuple<'a>(
     Err(rustler::Error::BadArg)
 }
 
-fn decode_dataclass<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyObject> {
+fn decode_dataclass<'a>(env: Env<'a>, term: Term<'a>, depth: usize) -> NifResult<MontyObject> {
     let name_key = Atom::from_str(env, "name").unwrap().encode(env);
     let name: String = term
         .map_get(name_key)
         .map_err(|_| rustler::Error::BadArg)?
         .decode()?;
 
+    // `frozen` must be a real boolean. Previously a malformed value (e.g. the
+    // atom `:bad`) was silently coerced to `false`, forging a mutable instance
+    // out of garbage; now it's rejected.
     let frozen_key = Atom::from_str(env, "frozen").unwrap().encode(env);
     let frozen: bool = term
         .map_get(frozen_key)
         .map_err(|_| rustler::Error::BadArg)?
         .decode()
-        .unwrap_or(false);
+        .map_err(|_| invalid_dataclass("frozen must be a boolean"))?;
 
+    // `type_id` must be absent, nil, or a non-negative integer (u64). A
+    // present-but-malformed value is rejected rather than coerced to 0.
     let type_id_key = Atom::from_str(env, "type_id").unwrap().encode(env);
-    let type_id: u64 = term
-        .map_get(type_id_key)
-        .ok()
-        .and_then(|t| {
-            if t.is_atom() {
-                None // nil atom
-            } else {
-                t.decode::<u64>().ok()
-            }
-        })
-        .unwrap_or(0);
+    let type_id: u64 = match term.map_get(type_id_key) {
+        Err(_) => 0,
+        Ok(t) if is_nil_atom(t) => 0, // nil / unset
+        Ok(t) => t
+            .decode::<u64>()
+            .map_err(|_| invalid_dataclass("type_id must be a non-negative integer or nil"))?,
+    };
 
     let fields_key = Atom::from_str(env, "fields").unwrap().encode(env);
     let fields_term = term
@@ -946,23 +1074,22 @@ fn decode_dataclass<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyObject> 
     let mut derived_field_names: Vec<String> = Vec::new();
     for (k, v) in fields_iter {
         let key_str: String = k.decode()?;
-        let val = decode_monty_object(env, v)?;
+        let val = decode_monty_object_depth(env, v, depth + 1)?;
         derived_field_names.push(key_str.clone());
         pairs.push((MontyObject::String(key_str), val));
     }
 
+    // `field_names`, when present and non-nil, must be a proper list of
+    // strings — not silently dropped back to the derived order on a decode
+    // failure.
     let field_names_key = Atom::from_str(env, "field_names").unwrap().encode(env);
-    let field_names: Vec<String> = term
-        .map_get(field_names_key)
-        .ok()
-        .and_then(|t| {
-            if t.is_atom() {
-                None // nil atom
-            } else {
-                t.decode::<Vec<String>>().ok()
-            }
-        })
-        .unwrap_or(derived_field_names);
+    let field_names: Vec<String> = match term.map_get(field_names_key) {
+        Err(_) => derived_field_names,
+        Ok(t) if is_nil_atom(t) => derived_field_names, // nil / unset
+        Ok(t) => t
+            .decode::<Vec<String>>()
+            .map_err(|_| invalid_dataclass("field_names must be a list of strings or nil"))?,
+    };
 
     Ok(MontyObject::Dataclass {
         name,

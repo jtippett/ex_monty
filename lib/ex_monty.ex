@@ -51,6 +51,45 @@ defmodule ExMonty do
 
   alias ExMonty.Native
 
+  # Hard safety cap on recursion depth. Monty converts a returned value to its
+  # output representation *recursively*, and that nested structure is also
+  # dropped recursively on a small dirty-scheduler native stack. A value nested
+  # deeper than a few hundred levels overflows that stack and aborts the whole
+  # BEAM — uncatchable. Empirically the overflow is ~325 levels, so we cap well
+  # below it with cross-platform margin. The cap is actually *enforced* in the
+  # NIF (`decode_resource_limits`), so it holds for `:unlimited` and for any
+  # direct `ExMonty.Native.*` call too; this value is only the default/advertised
+  # figure and MUST match `SAFE_MAX_RECURSION_DEPTH` in `native/ex_monty/src/types.rs`.
+  @safe_max_recursion_depth 128
+
+  # Conservative default resource limits, applied whenever a caller does not
+  # pass `:limits` (or passes `nil`). Running untrusted code with *no* limits
+  # lets an infinite loop pin a dirty-scheduler thread and an allocation loop
+  # exhaust memory and OOM-kill the whole node, so "no limits" must be an
+  # explicit, deliberate opt-in (`limits: :unlimited`) rather than the default.
+  # A caller-supplied map is merged over these, so specifying one limit doesn't
+  # silently drop the others.
+  @default_limits %{
+    max_duration_secs: 10.0,
+    max_allocations: 100_000_000,
+    max_memory: 512 * 1024 * 1024,
+    max_recursion_depth: @safe_max_recursion_depth
+  }
+
+  @doc """
+  Returns the default resource limits applied when `:limits` is omitted.
+  """
+  @spec default_limits() :: map()
+  def default_limits, do: @default_limits
+
+  @doc """
+  The hard upper bound on `:max_recursion_depth`. Enforced on every run
+  (including `limits: :unlimited`) because exceeding it can crash the BEAM, not
+  merely the call. A larger caller-supplied value is clamped to this.
+  """
+  @spec max_recursion_depth_cap() :: pos_integer()
+  def max_recursion_depth_cap, do: @safe_max_recursion_depth
+
   @type runner :: reference()
   @type snapshot :: reference()
   @type future_snapshot :: reference()
@@ -127,7 +166,7 @@ defmodule ExMonty do
   @spec run(runner(), map(), keyword()) ::
           {:ok, term(), String.t()} | {:error, error_reason()}
   def run(runner, inputs \\ %{}, opts \\ []) do
-    limits = Keyword.get(opts, :limits, nil)
+    limits = opts |> Keyword.get(:limits, nil) |> normalize_limits()
     input_list = Enum.map(inputs, fn {k, v} -> {to_string(k), v} end)
 
     case Native.run(runner, input_list, limits) do
@@ -211,7 +250,7 @@ defmodule ExMonty do
   """
   @spec start(runner(), map(), keyword()) :: {:ok, progress()} | {:error, error_reason()}
   def start(runner, inputs \\ %{}, opts \\ []) do
-    limits = Keyword.get(opts, :limits, nil)
+    limits = opts |> Keyword.get(:limits, nil) |> normalize_limits()
     input_list = Enum.map(inputs, fn {k, v} -> {to_string(k), v} end)
 
     case Native.start(runner, input_list, limits) do
@@ -270,7 +309,7 @@ defmodule ExMonty do
   @spec start_with_mounts(runner(), ExMonty.Mount.Lease.t(), map(), keyword()) ::
           {:ok, progress()} | {:error, error_reason()}
   def start_with_mounts(runner, %ExMonty.Mount.Lease{ref: lease_ref}, inputs \\ %{}, opts \\ []) do
-    limits = Keyword.get(opts, :limits, nil)
+    limits = opts |> Keyword.get(:limits, nil) |> normalize_limits()
     input_list = Enum.map(inputs, fn {k, v} -> {to_string(k), v} end)
 
     case Native.start_with_mounts(runner, input_list, limits, lease_ref) do
@@ -380,6 +419,14 @@ defmodule ExMonty do
   @doc """
   Deserializes a runner from a binary.
 
+  > #### Trusted input only {: .warning}
+  >
+  > Only load binaries your application produced with `dump/1` and stored in a
+  > trusted location. The binary is deserialized directly into native data
+  > structures; a maliciously crafted or deeply-nested binary can exhaust memory
+  > or overflow the native stack and crash the whole VM. Do not pass attacker-
+  > controlled bytes here.
+
   ## Examples
 
       {:ok, runner} = ExMonty.load_runner(binary)
@@ -407,6 +454,12 @@ defmodule ExMonty do
 
   @doc """
   Deserializes a snapshot from a binary.
+
+  > #### Trusted input only {: .warning}
+  >
+  > As with `load_runner/1`, only deserialize binaries your application produced
+  > with `dump_snapshot/1` and stored in a trusted location. Attacker-controlled
+  > bytes can crash the VM.
   """
   @spec load_snapshot(binary()) :: {:ok, snapshot()} | {:error, term()}
   def load_snapshot(binary) do
@@ -431,6 +484,11 @@ defmodule ExMonty do
 
   @doc """
   Deserializes a future snapshot from a binary.
+
+  > #### Trusted input only {: .warning}
+  >
+  > As with `load_runner/1`, only deserialize binaries your application produced
+  > and stored in a trusted location. Attacker-controlled bytes can crash the VM.
   """
   @spec load_future_snapshot(binary()) :: {:ok, future_snapshot()} | {:error, term()}
   def load_future_snapshot(binary) do
@@ -439,6 +497,20 @@ defmodule ExMonty do
     e in ErlangError ->
       {:error, e.original}
   end
+
+  # Resolve the caller's `:limits` option into the value passed to the NIF.
+  # `nil`/absent → safe defaults; `:unlimited` → no resource limits; a map →
+  # caller values merged over the defaults so specifying one limit doesn't drop
+  # the others. The mandatory recursion safety cap is NOT applied here — it is
+  # enforced unconditionally in the NIF (`decode_resource_limits`), so it holds
+  # even for `:unlimited` and for any direct `ExMonty.Native.*` call, and a
+  # malformed `:max_recursion_depth` is rejected there rather than coerced.
+  defp normalize_limits(nil), do: @default_limits
+  defp normalize_limits(:unlimited), do: nil
+  defp normalize_limits(limits) when is_map(limits), do: Map.merge(@default_limits, limits)
+  # Anything else (a bad option value) passes through to the NIF, which rejects
+  # it cleanly as a BadArg rather than raising a FunctionClauseError here.
+  defp normalize_limits(other), do: other
 
   defp validate_name_list(_label, []), do: :ok
 

@@ -21,7 +21,6 @@ defmodule ExMonty.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   def run(_runner, _inputs, _limits), do: :erlang.nif_error(:nif_not_loaded)
-  def run_no_limits(_runner, _inputs), do: :erlang.nif_error(:nif_not_loaded)
 
   # Interactive
   def start(_runner, _inputs, _limits), do: :erlang.nif_error(:nif_not_loaded)
