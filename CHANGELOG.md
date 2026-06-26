@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.5.0 - 2026-06-26
+
 ### Security / Hardening
 
 This release hardens the NIF boundary against inputs that could previously
