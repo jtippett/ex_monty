@@ -138,20 +138,25 @@ fn release_lease_inner(lease: &MountLease) {
         return;
     }
 
-    let table = match lease.table.lock() {
-        Ok(mut guard) => guard.take(),
-        Err(poisoned) => poisoned.into_inner().take(),
-    };
+    let table = lock_recover(&lease.table).take();
 
     if let Some(table) = table {
-        if let Ok(mut source_slot) = lease.source.table.lock() {
-            *source_slot = Some(table);
-        }
-        // If the source mutex is poisoned, intentionally drop the table.
-        // The mount resource will then be permanently leased (visible as
-        // `:mount_in_use` for any subsequent op) until GC'd. Better than
-        // panicking inside Drop.
+        // Recover even a poisoned source lock so the table is put back rather
+        // than dropped — dropping it would leave the mount resource permanently
+        // `:mount_in_use`. The lock is only ever poisoned by an unrelated
+        // unwind; the slot it guards is still valid.
+        *lock_recover(&lease.source.table) = Some(table);
     }
+}
+
+/// Lock a resource mutex, recovering the guard if a previous panic poisoned it.
+///
+/// A poisoned lock means some earlier NIF call unwound while holding it. The
+/// data it guards (a mount table / descriptor list) is still structurally
+/// valid, so panicking here on every later call would turn one transient
+/// failure into a permanent DoS of the resource. We recover the guard instead.
+fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // ── NIFs ─────────────────────────────────────────────────────────────────
@@ -163,12 +168,12 @@ pub fn mounts_new() -> ResourceArc<MountResource> {
 
 #[rustler::nif]
 pub fn mounts_count(resource: ResourceArc<MountResource>) -> usize {
-    resource.descriptors.lock().unwrap().len()
+    lock_recover(&resource.descriptors).len()
 }
 
 #[rustler::nif]
 pub fn mounts_list<'a>(env: Env<'a>, resource: ResourceArc<MountResource>) -> Term<'a> {
-    let descriptors = resource.descriptors.lock().unwrap();
+    let descriptors = lock_recover(&resource.descriptors);
     let entries: Vec<Term<'a>> = descriptors
         .iter()
         .map(|d| encode_list_entry(env, d))
@@ -208,7 +213,9 @@ fn encode_list_entry<'a>(env: Env<'a>, d: &MountDescriptor) -> Term<'a> {
     .unwrap()
 }
 
-#[rustler::nif]
+// `table.mount(...)` canonicalizes the host path, which hits the filesystem
+// and can block on slow storage — must not run on a regular scheduler.
+#[rustler::nif(schedule = "DirtyIo")]
 pub fn mounts_add<'a>(
     env: Env<'a>,
     resource: ResourceArc<MountResource>,
@@ -223,7 +230,7 @@ pub fn mounts_add<'a>(
     };
 
     // Acquire table first; bail early if leased.
-    let mut table_guard = resource.table.lock().unwrap();
+    let mut table_guard = lock_recover(&resource.table);
     let table = match table_guard.as_mut() {
         Some(t) => t,
         None => return error_atom(env, atoms::mount_in_use()),
@@ -231,7 +238,7 @@ pub fn mounts_add<'a>(
 
     // Now lock descriptors. Order: table → descriptors. count/1 only
     // touches descriptors so this never deadlocks with it.
-    let mut descriptors = resource.descriptors.lock().unwrap();
+    let mut descriptors = lock_recover(&resource.descriptors);
 
     if descriptors.iter().any(|d| d.virtual_path == virtual_path) {
         return error_tuple(env, atoms::already_mounted(), virtual_path.encode(env));
@@ -285,7 +292,7 @@ fn classify_mount_error(err: &monty::fs::MountError) -> Atom {
 
 #[rustler::nif]
 pub fn mounts_checkout<'a>(env: Env<'a>, resource: ResourceArc<MountResource>) -> Term<'a> {
-    let mut guard = resource.table.lock().unwrap();
+    let mut guard = lock_recover(&resource.table);
     match guard.take() {
         Some(table) => {
             let lease = MountLease {

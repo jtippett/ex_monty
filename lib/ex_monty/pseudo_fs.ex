@@ -87,6 +87,7 @@ defmodule ExMonty.PseudoFS do
   """
   @spec put_file(t(), String.t(), binary(), keyword()) :: t()
   def put_file(%__MODULE__{} = fs, path, content, opts \\ []) when is_binary(path) do
+    path = normalize_vpath(path)
     mode = Keyword.get(opts, :mode, 0o644)
     content = if is_binary(content), do: content, else: to_string(content)
     fs = ensure_parent_dirs(fs, path)
@@ -100,6 +101,7 @@ defmodule ExMonty.PseudoFS do
   """
   @spec put_bytes(t(), String.t(), binary(), keyword()) :: t()
   def put_bytes(%__MODULE__{} = fs, path, content, opts \\ []) when is_binary(path) do
+    path = normalize_vpath(path)
     mode = Keyword.get(opts, :mode, 0o644)
     fs = ensure_parent_dirs(fs, path)
     %{fs | files: Map.put(fs.files, path, {content, mode})}
@@ -112,6 +114,7 @@ defmodule ExMonty.PseudoFS do
   """
   @spec mkdir(t(), String.t()) :: t()
   def mkdir(%__MODULE__{} = fs, path) when is_binary(path) do
+    path = normalize_vpath(path)
     fs = ensure_parent_dirs(fs, path)
     %{fs | dirs: MapSet.put(fs.dirs, path)}
   end
@@ -369,8 +372,42 @@ defmodule ExMonty.PseudoFS do
 
   # ── Helpers ─────────────────────────────────────────────────────────────
 
-  defp extract_path({:path, p}), do: p
-  defp extract_path(p) when is_binary(p), do: p
+  defp extract_path({:path, p}), do: normalize_vpath(p)
+  defp extract_path(p) when is_binary(p), do: normalize_vpath(p)
+
+  # Lexically normalize a virtual path so `.`, `..`, `//`, and trailing
+  # slashes don't produce distinct keys for the same logical location (which
+  # would let untrusted code bypass the in-memory sandbox's view of a file).
+  # Resolution is purely lexical — `..` never escapes above the root — and
+  # never touches the host filesystem.
+  defp normalize_vpath(path) do
+    absolute? = String.starts_with?(path, "/")
+
+    segments =
+      path
+      |> String.split("/", trim: true)
+      |> Enum.reduce([], fn
+        ".", acc ->
+          acc
+
+        "..", acc ->
+          case acc do
+            [prev | rest] when prev != ".." -> rest
+            _ when absolute? -> acc
+            _ -> [".." | acc]
+          end
+
+        seg, acc ->
+          [seg | acc]
+      end)
+      |> Enum.reverse()
+
+    cond do
+      absolute? -> "/" <> Enum.join(segments, "/")
+      segments == [] -> "."
+      true -> Enum.join(segments, "/")
+    end
+  end
 
   defp file_not_found(path) do
     {:error, :file_not_found_error, "[Errno 2] No such file or directory: '#{path}'"}

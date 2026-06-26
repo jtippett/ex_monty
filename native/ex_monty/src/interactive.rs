@@ -7,8 +7,53 @@ use rustler::{Encoder, Env, NifResult, ResourceArc, Term};
 
 use crate::error;
 use crate::mounts::MountLease;
-use crate::resources::{FutureSnapshotResource, RunnerResource, SnapshotKind, SnapshotResource};
+use crate::resources::{
+    FutureSnapshotResource, RunnerResource, SnapshotKind, SnapshotResource, SnapshotTag,
+};
 use crate::types;
+
+/// A resume result decoded for a specific snapshot variant, produced *before*
+/// the snapshot is consumed so a malformed result can't destroy it.
+enum DecodedResume {
+    Ext(ExtFunctionResult),
+    Name(NameLookupResult),
+}
+
+fn decode_resume_result<'a>(
+    env: Env<'a>,
+    kind: SnapshotTag,
+    result: Term<'a>,
+) -> NifResult<DecodedResume> {
+    match kind {
+        SnapshotTag::NameLookup => Ok(DecodedResume::Name(decode_name_lookup_result(env, result)?)),
+        SnapshotTag::FunctionCall | SnapshotTag::OsCall => {
+            Ok(DecodedResume::Ext(decode_external_result(env, result)?))
+        }
+    }
+}
+
+fn apply_resume(
+    snap: SnapshotKind,
+    decoded: DecodedResume,
+    print: PrintWriter,
+) -> Result<RunProgress<LimitedTracker>, MontyException> {
+    match (snap, decoded) {
+        (SnapshotKind::FunctionCall(call), DecodedResume::Ext(r)) => call.resume(r, print),
+        (SnapshotKind::OsCall(call), DecodedResume::Ext(r)) => call.resume(r, print),
+        (SnapshotKind::NameLookup(lookup), DecodedResume::Name(r)) => lookup.resume(r, print),
+        // The snapshot variant is fixed once created and `take` is one-shot, so
+        // the kind we peeked always matches the kind we took — these arms are
+        // unreachable. Return a clean error rather than panic, just in case.
+        _ => Err(MontyException::new(
+            monty::ExcType::RuntimeError,
+            Some("snapshot kind/result mismatch".to_string()),
+        )),
+    }
+}
+
+fn snapshot_consumed_error() -> rustler::Error {
+    rustler::Error::RaiseTerm(Box::new("snapshot already consumed"))
+}
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn start<'a>(
@@ -40,28 +85,19 @@ fn resume<'a>(
     snapshot: ResourceArc<SnapshotResource>,
     result: Term<'a>,
 ) -> NifResult<Term<'a>> {
-    let snap = snapshot
-        .take()
-        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("snapshot already consumed")))?;
+    // Decode the (attacker-controlled) result *before* consuming the snapshot,
+    // so a malformed result returns an error and leaves the snapshot intact for
+    // a retry instead of silently destroying it.
+    let kind = snapshot.peek_kind().ok_or_else(snapshot_consumed_error)?;
+    let decoded = decode_resume_result(env, kind, result)?;
+
+    let snap = snapshot.take().ok_or_else(snapshot_consumed_error)?;
 
     let mut output = String::new();
     let print = PrintWriter::CollectString(&mut output);
 
-    let progress = match snap {
-        SnapshotKind::FunctionCall(call) => {
-            let external_result = decode_external_result(env, result)?;
-            call.resume(external_result, print)
-        }
-        SnapshotKind::OsCall(call) => {
-            let external_result = decode_external_result(env, result)?;
-            call.resume(external_result, print)
-        }
-        SnapshotKind::NameLookup(lookup) => {
-            let name_result = decode_name_lookup_result(env, result)?;
-            lookup.resume(name_result, print)
-        }
-    }
-    .map_err(error::monty_exception_to_rustler_error)?;
+    let progress =
+        apply_resume(snap, decoded, print).map_err(error::monty_exception_to_rustler_error)?;
 
     encode_run_progress(env, progress, &output)
 }
@@ -72,10 +108,8 @@ fn resume_futures<'a>(
     futures: ResourceArc<FutureSnapshotResource>,
     results: Vec<(u32, Term<'a>)>,
 ) -> NifResult<Term<'a>> {
-    let future_snap = futures
-        .take()
-        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("future snapshot already consumed")))?;
-
+    // Decode all (attacker-controlled) results before consuming the snapshot,
+    // so a malformed result leaves it intact for a retry.
     let external_results: Vec<(u32, ExtFunctionResult)> = results
         .into_iter()
         .map(|(id, term)| {
@@ -83,6 +117,10 @@ fn resume_futures<'a>(
             Ok((id, result))
         })
         .collect::<NifResult<Vec<_>>>()?;
+
+    let future_snap = futures
+        .take()
+        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("future snapshot already consumed")))?;
 
     let mut output = String::new();
 
@@ -122,7 +160,7 @@ fn encode_run_progress<'a>(
                 &call.args,
                 &call.kwargs,
                 call.call_id,
-            );
+            )?;
             let snapshot_ref =
                 ResourceArc::new(SnapshotResource::new(SnapshotKind::FunctionCall(call)));
             Ok(rustler::types::tuple::make_tuple(
@@ -140,7 +178,7 @@ fn encode_run_progress<'a>(
             // `to_args` consumes the call value, so clone it for the Elixir-facing
             // view and keep the original in the snapshot for resume/on_no_handler.
             let (args, kwargs) = call.function_call.clone().to_args();
-            let call_term = encode_os_call(env, &call.function_call, &args, &kwargs, call.call_id);
+            let call_term = encode_os_call(env, &call.function_call, &args, &kwargs, call.call_id)?;
             let snapshot_ref = ResourceArc::new(SnapshotResource::new(SnapshotKind::OsCall(call)));
             Ok(rustler::types::tuple::make_tuple(
                 env,
@@ -177,7 +215,7 @@ fn encode_run_progress<'a>(
         }
         RunProgress::Complete(value) => {
             let tag = Atom::from_str(env, "complete").unwrap();
-            let value_term = types::encode_monty_object(env, &value);
+            let value_term = types::encode_monty_object(env, &value)?;
             Ok(rustler::types::tuple::make_tuple(
                 env,
                 &[tag.encode(env), value_term, output_term],
@@ -192,16 +230,16 @@ fn encode_function_call<'a>(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
     call_id: u32,
-) -> Term<'a> {
+) -> NifResult<Term<'a>> {
     let struct_atom = Atom::from_str(env, "Elixir.ExMonty.FunctionCall").unwrap();
 
     let args_term: Vec<Term> = args
         .iter()
         .map(|a| types::encode_monty_object(env, a))
-        .collect();
-    let kwargs_term = encode_kwargs(env, kwargs);
+        .collect::<NifResult<Vec<_>>>()?;
+    let kwargs_term = encode_kwargs(env, kwargs)?;
 
-    rustler::types::map::map_new(env)
+    Ok(rustler::types::map::map_new(env)
         .map_put(
             Atom::from_str(env, "__struct__").unwrap().encode(env),
             struct_atom.encode(env),
@@ -226,7 +264,7 @@ fn encode_function_call<'a>(
             Atom::from_str(env, "call_id").unwrap().encode(env),
             call_id.encode(env),
         )
-        .unwrap()
+        .unwrap())
 }
 
 fn encode_os_call<'a>(
@@ -235,17 +273,17 @@ fn encode_os_call<'a>(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
     call_id: u32,
-) -> Term<'a> {
+) -> NifResult<Term<'a>> {
     let struct_atom = Atom::from_str(env, "Elixir.ExMonty.OsCall").unwrap();
 
     let func_term = types::encode_os_function(env, function);
     let args_term: Vec<Term> = args
         .iter()
         .map(|a| types::encode_monty_object(env, a))
-        .collect();
-    let kwargs_term = encode_kwargs(env, kwargs);
+        .collect::<NifResult<Vec<_>>>()?;
+    let kwargs_term = encode_kwargs(env, kwargs)?;
 
-    rustler::types::map::map_new(env)
+    Ok(rustler::types::map::map_new(env)
         .map_put(
             Atom::from_str(env, "__struct__").unwrap().encode(env),
             struct_atom.encode(env),
@@ -270,18 +308,18 @@ fn encode_os_call<'a>(
             Atom::from_str(env, "call_id").unwrap().encode(env),
             call_id.encode(env),
         )
-        .unwrap()
+        .unwrap())
 }
 
-fn encode_kwargs<'a>(env: Env<'a>, kwargs: &[(MontyObject, MontyObject)]) -> Term<'a> {
+fn encode_kwargs<'a>(env: Env<'a>, kwargs: &[(MontyObject, MontyObject)]) -> NifResult<Term<'a>> {
     let mut map = rustler::types::map::map_new(env);
     for (k, v) in kwargs {
         // kwargs keys are typically strings in Python
-        let key = types::encode_monty_object(env, k);
-        let val = types::encode_monty_object(env, v);
+        let key = types::encode_monty_object(env, k)?;
+        let val = types::encode_monty_object(env, v)?;
         map = map.map_put(key, val).unwrap();
     }
-    map
+    Ok(map)
 }
 
 fn decode_external_result<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<ExtFunctionResult> {
@@ -386,7 +424,11 @@ fn parse_exc_type(s: &str) -> monty::ExcType {
 // variants break out of the loop and surface to Elixir via
 // `encode_run_progress`.
 
-#[rustler::nif(schedule = "DirtyCpu")]
+// Mount-aware variants perform host filesystem I/O (canonicalize, read,
+// stat, ...) inside `drive_with_mounts`, which can block on slow storage
+// (NFS/FUSE). Run them on a dirty *I/O* scheduler so a blocked FS call
+// can't starve the small, CPU-count-sized DirtyCpu pool.
+#[rustler::nif(schedule = "DirtyIo")]
 fn start_with_mounts<'a>(
     env: Env<'a>,
     runner: ResourceArc<RunnerResource>,
@@ -414,40 +456,39 @@ fn start_with_mounts<'a>(
     encode_run_progress(env, progress, &output)
 }
 
-#[rustler::nif(schedule = "DirtyCpu")]
+#[rustler::nif(schedule = "DirtyIo")]
 fn resume_with_mounts<'a>(
     env: Env<'a>,
     snapshot: ResourceArc<SnapshotResource>,
     result: Term<'a>,
     lease: ResourceArc<MountLease>,
 ) -> NifResult<Term<'a>> {
-    let snap = snapshot
-        .take()
-        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("snapshot already consumed")))?;
+    let kind = snapshot.peek_kind().ok_or_else(snapshot_consumed_error)?;
 
     let mut output = String::new();
     let print = PrintWriter::CollectString(&mut output);
 
-    // Detect `:no_handler` from Elixir for OsCall snapshots — translate
-    // into upstream's canonical `OsFunction::on_no_handler` exception
-    // before resuming. For other snapshot kinds, decode normally.
-    let initial_progress = match snap {
-        SnapshotKind::OsCall(call) if is_no_handler_atom(result) => {
-            let exc = call.function_call.on_no_handler();
-            call.resume(ExtFunctionResult::Error(exc), print)
+    // Detect `:no_handler` from Elixir for OsCall snapshots — translate into
+    // upstream's canonical `OsFunction::on_no_handler` exception before
+    // resuming. For other snapshot kinds, decode the result *before* consuming
+    // the snapshot so a malformed result leaves it intact for a retry.
+    let initial_progress = if matches!(kind, SnapshotTag::OsCall) && is_no_handler_atom(result) {
+        match snapshot.take().ok_or_else(snapshot_consumed_error)? {
+            SnapshotKind::OsCall(call) => {
+                let exc = call.function_call.on_no_handler();
+                call.resume(ExtFunctionResult::Error(exc), print)
+            }
+            // Kind was peeked as OsCall and `take` is one-shot, so this is
+            // unreachable; surface a clean error instead of panicking.
+            _ => Err(MontyException::new(
+                monty::ExcType::RuntimeError,
+                Some("snapshot kind changed".to_string()),
+            )),
         }
-        SnapshotKind::OsCall(call) => {
-            let external_result = decode_external_result(env, result)?;
-            call.resume(external_result, print)
-        }
-        SnapshotKind::FunctionCall(call) => {
-            let external_result = decode_external_result(env, result)?;
-            call.resume(external_result, print)
-        }
-        SnapshotKind::NameLookup(lookup) => {
-            let name_result = decode_name_lookup_result(env, result)?;
-            lookup.resume(name_result, print)
-        }
+    } else {
+        let decoded = decode_resume_result(env, kind, result)?;
+        let snap = snapshot.take().ok_or_else(snapshot_consumed_error)?;
+        apply_resume(snap, decoded, print)
     }
     .map_err(error::monty_exception_to_rustler_error)?;
 
@@ -457,17 +498,14 @@ fn resume_with_mounts<'a>(
     encode_run_progress(env, progress, &output)
 }
 
-#[rustler::nif(schedule = "DirtyCpu")]
+#[rustler::nif(schedule = "DirtyIo")]
 fn resume_futures_with_mounts<'a>(
     env: Env<'a>,
     futures: ResourceArc<FutureSnapshotResource>,
     results: Vec<(u32, Term<'a>)>,
     lease: ResourceArc<MountLease>,
 ) -> NifResult<Term<'a>> {
-    let future_snap = futures
-        .take()
-        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("future snapshot already consumed")))?;
-
+    // Decode all (attacker-controlled) results before consuming the snapshot.
     let external_results: Vec<(u32, ExtFunctionResult)> = results
         .into_iter()
         .map(|(id, term)| {
@@ -475,6 +513,10 @@ fn resume_futures_with_mounts<'a>(
             Ok((id, result))
         })
         .collect::<NifResult<Vec<_>>>()?;
+
+    let future_snap = futures
+        .take()
+        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("future snapshot already consumed")))?;
 
     let mut output = String::new();
 

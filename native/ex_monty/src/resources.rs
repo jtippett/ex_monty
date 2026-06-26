@@ -1,6 +1,16 @@
 use monty::{FunctionCall, LimitedTracker, MontyRun, NameLookup, OsCall, ResolveFutures};
 use rustler::Resource;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+
+/// Lock a snapshot mutex, recovering the guard if a prior panic poisoned it.
+///
+/// These mutexes guard an `Option<Snapshot>` taken at most once. A poisoned
+/// lock (from an unwind in an earlier call) must not panic every later caller —
+/// that would turn one transient failure into a permanent DoS of the snapshot
+/// resource. The `Option` is still valid, so we recover the guard.
+fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Wrapper around MontyRun for use as a Rustler resource.
 /// MontyRun is Clone, so we can share it safely.
@@ -42,6 +52,16 @@ pub enum SnapshotKind {
     NameLookup(NameLookup<LimitedTracker>),
 }
 
+/// Lightweight tag identifying a snapshot's variant without consuming it.
+/// Lets `resume` decode the (attacker-controlled) result for the right variant
+/// *before* taking the snapshot, so a malformed result leaves it intact.
+#[derive(Clone, Copy)]
+pub enum SnapshotTag {
+    FunctionCall,
+    OsCall,
+    NameLookup,
+}
+
 /// Wrapper around resumable snapshot variants.
 /// Uses Mutex<Option<...>> because resume consumes the snapshot.
 pub struct SnapshotResource {
@@ -57,7 +77,17 @@ impl SnapshotResource {
 
     /// Take the snapshot out, consuming it. Returns None if already taken.
     pub fn take(&self) -> Option<SnapshotKind> {
-        self.snapshot.lock().unwrap().take()
+        lock_recover(&self.snapshot).take()
+    }
+
+    /// Inspect the snapshot's variant without consuming it. Returns None if
+    /// already taken.
+    pub fn peek_kind(&self) -> Option<SnapshotTag> {
+        lock_recover(&self.snapshot).as_ref().map(|k| match k {
+            SnapshotKind::FunctionCall(_) => SnapshotTag::FunctionCall,
+            SnapshotKind::OsCall(_) => SnapshotTag::OsCall,
+            SnapshotKind::NameLookup(_) => SnapshotTag::NameLookup,
+        })
     }
 }
 
@@ -79,7 +109,7 @@ impl FutureSnapshotResource {
 
     /// Take the snapshot out, consuming it. Returns None if already taken.
     pub fn take(&self) -> Option<ResolveFutures<LimitedTracker>> {
-        self.snapshot.lock().unwrap().take()
+        lock_recover(&self.snapshot).take()
     }
 
     /// Access the snapshot without consuming it (for pending_call_ids).
@@ -87,7 +117,7 @@ impl FutureSnapshotResource {
     where
         F: FnOnce(&ResolveFutures<LimitedTracker>) -> R,
     {
-        let guard = self.snapshot.lock().unwrap();
+        let guard = lock_recover(&self.snapshot);
         guard.as_ref().map(f)
     }
 }
