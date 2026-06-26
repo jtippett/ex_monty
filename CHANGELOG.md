@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### Security / Hardening
+
+This release hardens the NIF boundary against inputs that could previously
+panic, exhaust memory, or **stack-overflow the BEAM VM** (a Rust crash in a NIF
+takes down the whole node, not just one process). ExMonty runs untrusted code,
+so the boundary is now defensive by default.
+
+- **Default resource limits are now applied when `:limits` is omitted.**
+  `run/3`, `eval/2`, `start/*`, and friends now default to conservative caps
+  (10s wall-clock, 100M allocations, 512 MB memory, recursion depth 128) instead
+  of running unbounded. Pass `limits: :unlimited` to opt out for trusted code, or
+  a map to override individual fields. Inspect the defaults via
+  `ExMonty.default_limits/0`. **This is a behavioral change**: code that
+  previously relied on unbounded execution must now pass `limits: :unlimited`.
+
+- **Recursion-depth cap is enforced in the NIF**, not just in Elixir, so it
+  cannot be bypassed by calling `ExMonty.Native.*` directly. `max_recursion_depth`
+  is clamped to a safe ceiling regardless of how the runner is invoked; see
+  `ExMonty.max_recursion_depth_cap/0`.
+
+- **Value encode/decode at the NIF boundary is depth-guarded.** Deeply nested
+  inputs or result values are rejected with a clean error instead of overflowing
+  the dirty-scheduler stack (which is uncatchable and crashes the VM).
+
+- **Stricter decoding of tagged values.** Bigint tuples must carry a valid,
+  canonical sign and a bounded magnitude; dataclass tuples validate `frozen`,
+  `type_id`, and `field_names`; malformed resource-limit values are rejected
+  rather than silently coerced. Negative or non-finite durations/limits error
+  cleanly.
+
+- **`PseudoFS` virtual paths are lexically normalized** (`.`, `..`, and
+  duplicate slashes collapse; `..` cannot escape above the root) at every
+  ingress.
+
+- Snapshot resume peeks the callback result before consuming the snapshot, and
+  mount-aware NIFs run on dirty-IO schedulers. Lock poisoning is recovered
+  rather than propagated as a panic.
+
+- **Known limitation:** `load_runner/1`, `load_snapshot/1`, and
+  `load_future_snapshot/1` deserialize trusted bytes only — feeding them
+  attacker-controlled binaries can still OOM or overflow. Documented inline.
+
 ## 0.4.2 - 2026-06-20
 
 ## 0.4.1 - 2026-06-20
