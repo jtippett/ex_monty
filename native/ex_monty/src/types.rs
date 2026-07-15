@@ -452,6 +452,9 @@ fn decode_monty_object_depth<'a>(
 
     // Big integer (arbitrary precision)
     if let Ok(bi) = term.decode::<BigInt>() {
+        if bi.bits() > (MAX_BIGINT_BYTES as u64) * 8 {
+            return Err(bigint_size_error());
+        }
         return Ok(MontyObject::BigInt(bi));
     }
 
@@ -564,9 +567,7 @@ fn decode_monty_object_depth<'a>(
                     let binary: rustler::Binary = elements[2].decode()?;
                     let bytes = binary.as_slice();
                     if bytes.len() > MAX_BIGINT_BYTES {
-                        return Err(rustler::Error::Term(Box::new(
-                            "bigint magnitude exceeds ExMonty MAX_BIGINT_BYTES",
-                        )));
+                        return Err(bigint_size_error());
                     }
                     let num_sign = match sign {
                         -1 => num_bigint::Sign::Minus,
@@ -662,6 +663,14 @@ pub fn decode_inputs<'a>(
         ))));
     }
 
+    if inputs.len() > expected_input_names.len() {
+        return Err(rustler::Error::Term(Box::new(format!(
+            "too many inputs: expected {}, got {}",
+            expected_input_names.len(),
+            inputs.len()
+        ))));
+    }
+
     let mut expected_set: HashSet<&str> = HashSet::with_capacity(expected_input_names.len());
     for name in expected_input_names {
         if !expected_set.insert(name.as_str()) {
@@ -673,6 +682,12 @@ pub fn decode_inputs<'a>(
 
     let mut provided: HashMap<String, MontyObject> = HashMap::with_capacity(inputs.len());
     for (name, term) in inputs {
+        if !expected_set.contains(name.as_str()) {
+            return Err(rustler::Error::Term(Box::new(format!(
+                "unexpected input: {name}"
+            ))));
+        }
+
         if provided.contains_key(&name) {
             return Err(rustler::Error::Term(Box::new(format!(
                 "duplicate input provided: {name}"
@@ -718,7 +733,7 @@ pub fn decode_inputs<'a>(
 pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
     if term.is_atom() {
         let s = term.atom_to_string().map_err(|_| rustler::Error::BadArg)?;
-        if s == "nil" {
+        if matches!(s.as_str(), "nil" | "unlimited") {
             return Ok(cap_recursion_depth(ResourceLimits::new()));
         }
     }
@@ -867,7 +882,7 @@ fn map_get_optional_string<'a>(
         if s == "nil" {
             return Ok(None);
         }
-        return Ok(Some(s));
+        return Err(rustler::Error::BadArg);
     }
     Ok(Some(term.decode()?))
 }
@@ -906,10 +921,7 @@ fn decode_file_handle<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<MontyFileHa
     let path: String = map_get_atom(env, term, "path")?.decode()?;
     let mode_str: String = map_get_atom(env, term, "mode")?.decode()?;
     let mode = FileMode::from_str(&mode_str).map_err(|_| rustler::Error::BadArg)?;
-    let position: u64 = match map_get_atom(env, term, "position") {
-        Ok(t) => t.decode().unwrap_or(0),
-        Err(_) => 0,
-    };
+    let position: u64 = map_get_atom(env, term, "position")?.decode()?;
     Ok(MontyFileHandle {
         path,
         mode,
@@ -978,6 +990,7 @@ fn decode_named_tuple<'a>(
         let fields: Vec<Term> = fields_term.decode()?;
         let mut field_names = Vec::with_capacity(fields.len());
         let mut values = Vec::with_capacity(fields.len());
+        let mut seen = HashSet::with_capacity(fields.len());
 
         for item in fields {
             let elems = get_tuple(item).map_err(|_| rustler::Error::BadArg)?;
@@ -994,6 +1007,12 @@ fn decode_named_tuple<'a>(
             } else {
                 return Err(rustler::Error::BadArg);
             };
+
+            if !seen.insert(field_name.clone()) {
+                return Err(rustler::Error::Term(Box::new(format!(
+                    "duplicate named tuple field: {field_name}"
+                ))));
+            }
 
             let value = decode_monty_object_depth(env, elems[1], depth + 1)?;
             field_names.push(field_name);
@@ -1084,12 +1103,20 @@ fn decode_dataclass<'a>(env: Env<'a>, term: Term<'a>, depth: usize) -> NifResult
     // failure.
     let field_names_key = Atom::from_str(env, "field_names").unwrap().encode(env);
     let field_names: Vec<String> = match term.map_get(field_names_key) {
-        Err(_) => derived_field_names,
-        Ok(t) if is_nil_atom(t) => derived_field_names, // nil / unset
+        Err(_) => derived_field_names.clone(),
+        Ok(t) if is_nil_atom(t) => derived_field_names.clone(), // nil / unset
         Ok(t) => t
             .decode::<Vec<String>>()
             .map_err(|_| invalid_dataclass("field_names must be a list of strings or nil"))?,
     };
+
+    let names: HashSet<&str> = field_names.iter().map(String::as_str).collect();
+    let derived: HashSet<&str> = derived_field_names.iter().map(String::as_str).collect();
+    if names.len() != field_names.len() || names != derived {
+        return Err(invalid_dataclass(
+            "field_names must contain each field exactly once",
+        ));
+    }
 
     Ok(MontyObject::Dataclass {
         name,
@@ -1098,6 +1125,12 @@ fn decode_dataclass<'a>(env: Env<'a>, term: Term<'a>, depth: usize) -> NifResult
         attrs: DictPairs::from(pairs),
         frozen,
     })
+}
+
+fn bigint_size_error() -> rustler::Error {
+    rustler::Error::Term(Box::new(
+        "bigint magnitude exceeds ExMonty MAX_BIGINT_BYTES",
+    ))
 }
 
 fn normalize_namedtuple_type_name(s: &str) -> String {

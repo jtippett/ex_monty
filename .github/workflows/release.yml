@@ -87,7 +87,8 @@ jobs:
   # Generates the precompiled-NIF checksum file from the artifacts just attached
   # to the GitHub release, then publishes to Hex. Gated by the `hex` environment:
   # GitHub pauses here for a required reviewer to approve, so you still eyeball
-  # the release before anything ships. No manual checksum commit, no re-tag.
+  # the release before anything ships. The job commits the generated checksum
+  # to master before publishing; no manual checksum commit or re-tag.
   publish:
     name: Publish to Hex
     needs: release
@@ -117,6 +118,19 @@ jobs:
         # writes checksum-Elixir.ExMonty.Native.exs — the canonical way, so the
         # format always matches what rustler_precompiled expects at fetch time.
         run: mix rustler_precompiled.download ExMonty.Native --all --print
+
+      - name: Commit checksums to master
+        run: |
+          git fetch origin master:refs/remotes/origin/master
+          if git diff --quiet origin/master -- checksum-Elixir.ExMonty.Native.exs; then
+            echo "Checksum is already present on master"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add checksum-Elixir.ExMonty.Native.exs
+            git commit -m "Update precompiled NIF checksums for ${GITHUB_REF_NAME}"
+            git push origin HEAD:master
+          fi
 
       - name: Publish package to Hex
         run: mix hex.publish package --yes

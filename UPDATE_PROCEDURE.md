@@ -62,8 +62,19 @@ git diff <OUR_PINNED_REV>..<TARGET_TAG> -- \
   crates/monty/src/resource.rs \
   crates/monty/src/exception_public.rs \
   crates/monty/src/exception_private.rs \
-  crates/monty/src/io.rs
+  crates/monty/src/io.rs \
+  crates/monty/src/run_progress.rs \
+  crates/monty/src/fs/dispatch.rs \
+  crates/monty/src/fs/path_security.rs \
+  crates/monty/src/fs/mount_table.rs
 ```
+
+For every update, explicitly re-check these security invariants rather than
+relying on compilation: `PrintWriterCallback` output must remain fallible and
+budgeted by ExMonty; mount matching must be component-aware; host paths must be
+canonicalized; symlinks must not escape a mount; read-only and write quotas must
+fail closed; `resume_pending` and `ResolveFutures::resume` must preserve call-ID
+ownership and retry semantics.
 
 ### 1.4 Read the commit log for context
 
@@ -89,10 +100,10 @@ Changes to types/functions we directly use:
 | `MontyObject` variants + encoding | `types.rs` (22KB — largest module) |
 | `OsFunction` variants | `types.rs`, `interactive.rs` |
 | `MontyException`, `ExcType`, `StackFrame` | `error.rs`, `interactive.rs` |
-| `Snapshot::run()`, `FutureSnapshot::resume()` | `interactive.rs`, `resources.rs` |
+| `FunctionCall::resume()`, `FunctionCall::resume_pending()`, `ResolveFutures::resume()` | `interactive.rs`, `resources.rs` |
 | `RunProgress` variants | `interactive.rs` |
-| `ExternalResult` variants | `interactive.rs` |
-| `CollectStringPrint`, `.into_output()` | `lib.rs` |
+| `ExtFunctionResult` variants | `interactive.rs` |
+| `PrintWriter`, `PrintWriterCallback` | `lib.rs`, `interactive.rs`, `output.rs` |
 | `ResourceLimits`, `LimitedTracker`, `ResourceError` | `lib.rs`, `types.rs`, `resources.rs` |
 | `Serialize`/`Deserialize` on `MontyRun`, `Snapshot`, `FutureSnapshot` | `serialization.rs` |
 

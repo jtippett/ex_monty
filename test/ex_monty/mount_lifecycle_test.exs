@@ -81,7 +81,7 @@ defmodule ExMonty.MountLifecycleTest do
 
       slow_handler =
         fn _args, _kwargs ->
-          send(parent, :paused)
+          send(parent, {:paused, self()})
           # Block until the parent unblocks us.
           receive do
             :continue -> {:ok, "result"}
@@ -90,7 +90,7 @@ defmodule ExMonty.MountLifecycleTest do
           end
         end
 
-      runner =
+      _runner =
         spawn_link(fn ->
           result =
             ExMonty.Sandbox.run(
@@ -105,13 +105,13 @@ defmodule ExMonty.MountLifecycleTest do
         end)
 
       # Wait until the run is paused inside the handler.
-      assert_receive :paused, 1_000
+      assert_receive {:paused, callback_worker}, 1_000
 
       # While paused, the source mount is leased — concurrent checkout fails.
       assert {:error, :mount_in_use} = Mount.checkout(mounts)
 
       # Let the handler finish, the run completes, lease is released.
-      send(runner, :continue)
+      send(callback_worker, :continue)
       assert_receive {:done, {:ok, "result", _}}, 1_000
 
       # Mount is usable again.

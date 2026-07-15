@@ -2,6 +2,8 @@ use monty::{FunctionCall, LimitedTracker, MontyRun, NameLookup, OsCall, ResolveF
 use rustler::Resource;
 use std::sync::{Mutex, MutexGuard};
 
+use crate::output::OutputBudget;
+
 /// Lock a snapshot mutex, recovering the guard if a prior panic poisoned it.
 ///
 /// These mutexes guard an `Option<Snapshot>` taken at most once. A poisoned
@@ -52,6 +54,15 @@ pub enum SnapshotKind {
     NameLookup(NameLookup<LimitedTracker>),
 }
 
+/// Serializable one-shot snapshot plus the print-output budget accumulated by
+/// the same run. Keeping these together prevents dump/load or resume from
+/// resetting a configured memory ceiling.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SnapshotState {
+    pub snapshot: SnapshotKind,
+    pub output_budget: OutputBudget,
+}
+
 /// Lightweight tag identifying a snapshot's variant without consuming it.
 /// Lets `resume` decode the (attacker-controlled) result for the right variant
 /// *before* taking the snapshot, so a malformed result leaves it intact.
@@ -65,29 +76,34 @@ pub enum SnapshotTag {
 /// Wrapper around resumable snapshot variants.
 /// Uses Mutex<Option<...>> because resume consumes the snapshot.
 pub struct SnapshotResource {
-    snapshot: Mutex<Option<SnapshotKind>>,
+    snapshot: Mutex<Option<SnapshotState>>,
 }
 
 impl SnapshotResource {
-    pub fn new(snapshot: SnapshotKind) -> Self {
+    pub fn new(snapshot: SnapshotKind, output_budget: OutputBudget) -> Self {
         Self {
-            snapshot: Mutex::new(Some(snapshot)),
+            snapshot: Mutex::new(Some(SnapshotState {
+                snapshot,
+                output_budget,
+            })),
         }
     }
 
     /// Take the snapshot out, consuming it. Returns None if already taken.
-    pub fn take(&self) -> Option<SnapshotKind> {
+    pub fn take(&self) -> Option<SnapshotState> {
         lock_recover(&self.snapshot).take()
     }
 
     /// Inspect the snapshot's variant without consuming it. Returns None if
     /// already taken.
     pub fn peek_kind(&self) -> Option<SnapshotTag> {
-        lock_recover(&self.snapshot).as_ref().map(|k| match k {
-            SnapshotKind::FunctionCall(_) => SnapshotTag::FunctionCall,
-            SnapshotKind::OsCall(_) => SnapshotTag::OsCall,
-            SnapshotKind::NameLookup(_) => SnapshotTag::NameLookup,
-        })
+        lock_recover(&self.snapshot)
+            .as_ref()
+            .map(|state| match &state.snapshot {
+                SnapshotKind::FunctionCall(_) => SnapshotTag::FunctionCall,
+                SnapshotKind::OsCall(_) => SnapshotTag::OsCall,
+                SnapshotKind::NameLookup(_) => SnapshotTag::NameLookup,
+            })
     }
 }
 
@@ -97,18 +113,27 @@ impl Resource for SnapshotResource {}
 /// Wrapper around ResolveFutures<LimitedTracker>.
 /// Uses Mutex<Option<...>> because resume consumes the snapshot.
 pub struct FutureSnapshotResource {
-    snapshot: Mutex<Option<ResolveFutures<LimitedTracker>>>,
+    snapshot: Mutex<Option<FutureSnapshotState>>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct FutureSnapshotState {
+    pub snapshot: ResolveFutures<LimitedTracker>,
+    pub output_budget: OutputBudget,
 }
 
 impl FutureSnapshotResource {
-    pub fn new(snapshot: ResolveFutures<LimitedTracker>) -> Self {
+    pub fn new(snapshot: ResolveFutures<LimitedTracker>, output_budget: OutputBudget) -> Self {
         Self {
-            snapshot: Mutex::new(Some(snapshot)),
+            snapshot: Mutex::new(Some(FutureSnapshotState {
+                snapshot,
+                output_budget,
+            })),
         }
     }
 
     /// Take the snapshot out, consuming it. Returns None if already taken.
-    pub fn take(&self) -> Option<ResolveFutures<LimitedTracker>> {
+    pub fn take(&self) -> Option<FutureSnapshotState> {
         lock_recover(&self.snapshot).take()
     }
 
@@ -118,7 +143,7 @@ impl FutureSnapshotResource {
         F: FnOnce(&ResolveFutures<LimitedTracker>) -> R,
     {
         let guard = lock_recover(&self.snapshot);
-        guard.as_ref().map(f)
+        guard.as_ref().map(|state| f(&state.snapshot))
     }
 }
 

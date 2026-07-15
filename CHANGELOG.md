@@ -1,6 +1,51 @@
 # Changelog
 
-## [Unreleased]
+## 0.5.1 - 2026-07-15
+
+### Security / Hardening
+
+- Captured `print()` output is now fallibly allocated (via `try_reserve_exact`,
+  so the buffer capacity cannot grow past the budget) and counted cumulatively
+  against `max_memory`, including across interactive and serialized snapshots.
+  This budget is tracked independently of Monty's heap tracker, so the effective
+  peak for a captured run is bounded by roughly `2 × max_memory` (the printed
+  value on Monty's heap plus the captured copy), not `max_memory` exactly.
+- `Sandbox` callbacks run in monitored worker processes with a validated 10s
+  default timeout. Raises, throws, exits, brutal kills, and timeouts no longer
+  kill or indefinitely block the sandbox caller; timed-out workers are killed
+  before control returns. This contains ordinary BEAM callbacks; it cannot
+  cancel a non-cooperative native NIF a callback itself invokes (e.g. a nested
+  `run` busy-loop on a dirty scheduler) or unlinked processes a
+  callback spawns. Restrict callbacks to cooperative code.
+- Callback, name-lookup, file-handle, bigint, dataclass, and future-result
+  decoding is strict. Malformed replies, unknown exception types, duplicate or
+  unknown future IDs, oversized ordinary bigints, and inconsistent dataclass
+  fields are rejected before consuming resumable state.
+- Potentially blocking mount release now runs on a dirty-I/O scheduler. Large
+  mount/future metadata encoding uses dirty-CPU schedulers, and mount metadata
+  locks are no longer held during host-path canonicalisation.
+- Snapshot and future-snapshot dumps carry a versioned magic header and reject
+  trailing bytes after a valid payload, so corrupt or appended data fails closed.
+
+### Fixes
+
+- `:pending` now exposes Monty's asynchronous external-call lifecycle through
+  `resume/2`, making `resolve_futures`, `pending_call_ids/1`, and
+  `resume_futures/2` reachable and retry-safe.
+- `PseudoFS` now implements `:open`, `:append_text`, and `:append_bytes`, and a
+  newly constructed filesystem contains its root directory.
+- Public wrappers normalize Rustler `badarg` failures into `{:error, reason}`
+  instead of leaking `ArgumentError` despite their return types.
+- `Sandbox.run/2` no longer fabricates `nil` results if pending futures somehow
+  reach its synchronous loop; it fails explicitly and directs callers to the
+  low-level future API.
+- A raising, timed-out, or error-returning `handle_name_lookup/1` now surfaces
+  its real reason from `Sandbox.run/2` instead of the opaque strict-decode
+  failure that resuming a name lookup with an error result would otherwise emit.
+
+Snapshot and future-snapshot dumps created before this change are not compatible
+with the new versioned, cumulative-output-budget serialization format. Runner
+dumps are unchanged. The serialization APIs remain trusted-input-only.
 
 ## 0.5.0 - 2026-06-26
 

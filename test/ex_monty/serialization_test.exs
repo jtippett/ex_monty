@@ -42,5 +42,39 @@ defmodule ExMonty.SerializationTest do
       {:ok, final} = ExMonty.resume(restored, {:ok, "response"})
       assert {:complete, "response", _} = final
     end
+
+    test "roundtrip preserves cumulative output limits" do
+      code = """
+      print("x" * 200_000)
+      external()
+      print("y" * 200_000)
+      """
+
+      {:ok, runner} = ExMonty.compile(code)
+
+      assert {:ok, {:function_call, _call, snapshot, output}} =
+               ExMonty.start(runner, %{}, limits: %{max_memory: 300_000})
+
+      assert byte_size(output) > 200_000
+      assert {:ok, binary} = ExMonty.dump_snapshot(snapshot)
+      assert {:ok, restored} = ExMonty.load_snapshot(binary)
+      assert {:error, _} = ExMonty.resume(restored, {:ok, nil})
+    end
+
+    test "corrupt or unversioned snapshot data is rejected cleanly" do
+      assert {:error, _} = ExMonty.load_snapshot(<<>>)
+      assert {:error, _} = ExMonty.load_snapshot(<<0, 1, 2, 3>>)
+      assert {:error, _} = ExMonty.load_future_snapshot(<<0, 1, 2, 3>>)
+    end
+
+    test "a valid snapshot with appended trailing bytes is rejected" do
+      {:ok, runner} = ExMonty.compile("external()")
+
+      assert {:ok, {:function_call, _call, snapshot, _output}} = ExMonty.start(runner)
+      assert {:ok, binary} = ExMonty.dump_snapshot(snapshot)
+
+      assert {:error, _} = ExMonty.load_snapshot(binary <> <<0>>)
+      assert {:error, _} = ExMonty.load_snapshot(binary <> "garbage")
+    end
   end
 end

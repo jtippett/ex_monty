@@ -171,7 +171,7 @@ pub fn mounts_count(resource: ResourceArc<MountResource>) -> usize {
     lock_recover(&resource.descriptors).len()
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 pub fn mounts_list<'a>(env: Env<'a>, resource: ResourceArc<MountResource>) -> Term<'a> {
     let descriptors = lock_recover(&resource.descriptors);
     let entries: Vec<Term<'a>> = descriptors
@@ -236,11 +236,13 @@ pub fn mounts_add<'a>(
         None => return error_atom(env, atoms::mount_in_use()),
     };
 
-    // Now lock descriptors. Order: table → descriptors. count/1 only
-    // touches descriptors so this never deadlocks with it.
-    let mut descriptors = lock_recover(&resource.descriptors);
-
-    if descriptors.iter().any(|d| d.virtual_path == virtual_path) {
+    // Keep the descriptor lock away from the blocking canonicalisation inside
+    // `table.mount`, so count/list remain responsive while slow storage is
+    // being inspected. The table lock serialises concurrent add calls.
+    if lock_recover(&resource.descriptors)
+        .iter()
+        .any(|d| d.virtual_path == virtual_path)
+    {
         return error_tuple(env, atoms::already_mounted(), virtual_path.encode(env));
     }
 
@@ -251,7 +253,7 @@ pub fn mounts_add<'a>(
         write_bytes_limit,
     ) {
         Ok(()) => {
-            descriptors.push(MountDescriptor {
+            lock_recover(&resource.descriptors).push(MountDescriptor {
                 virtual_path,
                 host_path,
                 mode,
@@ -290,7 +292,10 @@ fn classify_mount_error(err: &monty::fs::MountError) -> Atom {
     }
 }
 
-#[rustler::nif]
+// A concurrent DirtyIo `mounts_add` holds the table mutex while upstream
+// canonicalizes its host path. Checkout must use DirtyIo too so waiting for
+// that mutex cannot stall a regular scheduler.
+#[rustler::nif(schedule = "DirtyIo")]
 pub fn mounts_checkout<'a>(env: Env<'a>, resource: ResourceArc<MountResource>) -> Term<'a> {
     let mut guard = lock_recover(&resource.table);
     match guard.take() {
@@ -306,7 +311,7 @@ pub fn mounts_checkout<'a>(env: Env<'a>, resource: ResourceArc<MountResource>) -
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 pub fn mounts_release(lease: ResourceArc<MountLease>) -> Atom {
     release_lease_inner(&lease);
     atoms::ok()

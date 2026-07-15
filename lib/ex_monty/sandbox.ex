@@ -102,6 +102,9 @@ defmodule ExMonty.Sandbox do
       )
   """
 
+  @default_callback_timeout 10_000
+  @max_callback_error_chars 1_000
+
   @type handler_result :: {:ok, term()} | {:error, atom(), String.t()}
 
   @doc """
@@ -146,6 +149,10 @@ defmodule ExMonty.Sandbox do
       `PermissionError`.
     * `:limits` - resource limits map (default: `nil`)
     * `:script_name` - script name for tracebacks (default: `"main.py"`)
+    * `:callback_timeout` - maximum milliseconds for each external callback
+      (default: `10_000`; use `:infinity` to disable). Callbacks run in isolated,
+      monitored processes, so `self()` and the process dictionary refer to the
+      callback worker rather than the `Sandbox.run/2` caller.
 
   Either `:handler` or `:functions` must be provided for external function calls.
   OS calls require either `:os` or `handle_os/3` in the `:handler` module.
@@ -182,6 +189,7 @@ defmodule ExMonty.Sandbox do
     limits = Keyword.get(opts, :limits, nil)
     script_name = Keyword.get(opts, :script_name, "main.py")
     mounts = Keyword.get(opts, :mounts)
+    callback_timeout = Keyword.get(opts, :callback_timeout, @default_callback_timeout)
 
     input_names = inputs |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
 
@@ -190,12 +198,14 @@ defmodule ExMonty.Sandbox do
       script_name: script_name
     ]
 
-    with {:ok, runner} <- ExMonty.compile(code, compile_opts) do
+    with :ok <- validate_callback_timeout(callback_timeout),
+         {:ok, runner} <- ExMonty.compile(code, compile_opts) do
       run_with_optional_mounts(runner, inputs, limits, %{
         handler: handler,
         functions: functions,
         os: os_handlers,
-        mounts: mounts
+        mounts: mounts,
+        callback_timeout: callback_timeout
       })
     end
   end
@@ -203,7 +213,7 @@ defmodule ExMonty.Sandbox do
   defp run_with_optional_mounts(runner, inputs, limits, %{mounts: nil} = state) do
     with {:ok, progress} <- ExMonty.start(runner, inputs, limits: limits) do
       state = Map.put(state, :lease, nil)
-      loop(progress, state, "")
+      loop(progress, state, [])
     end
   end
 
@@ -223,7 +233,7 @@ defmodule ExMonty.Sandbox do
 
           with {:ok, progress} <-
                  ExMonty.start_with_mounts(runner, lease, inputs, limits: limits) do
-            loop(progress, state, "")
+            loop(progress, state, [])
           end
         after
           ExMonty.Mount.release(lease)
@@ -234,19 +244,28 @@ defmodule ExMonty.Sandbox do
   defp loop(progress, state, acc_output) do
     case progress do
       {:name_lookup, name, snapshot, output} ->
-        acc_output = acc_output <> output
-        result = resolve_name(name, state)
+        acc_output = [output | acc_output]
 
-        case resume_from(snapshot, result, state) do
-          {:ok, next_progress} ->
-            loop(next_progress, state, acc_output)
+        case resolve_name(name, state) do
+          # Monty has no error variant for name lookups, so a raising, timed-out,
+          # or error-returning handler cannot resume into a Python exception.
+          # Surface the real reason instead of the opaque strict-decode failure
+          # that passing an {:error, _, _} tuple to `resume/2` would produce.
+          {:error, _type, message} ->
+            {:error, message}
 
-          {:error, reason} ->
-            {:error, reason}
+          result ->
+            case resume_from(snapshot, result, state) do
+              {:ok, next_progress} ->
+                loop(next_progress, state, acc_output)
+
+              {:error, reason} ->
+                {:error, reason}
+            end
         end
 
       {:function_call, %ExMonty.FunctionCall{} = call, snapshot, output} ->
-        acc_output = acc_output <> output
+        acc_output = [output | acc_output]
         result = dispatch_function(call.name, call.args, call.kwargs, state)
 
         case resume_from(snapshot, result, state) do
@@ -258,7 +277,7 @@ defmodule ExMonty.Sandbox do
         end
 
       {:method_call, %ExMonty.FunctionCall{} = call, snapshot, output} ->
-        acc_output = acc_output <> output
+        acc_output = [output | acc_output]
         result = dispatch_function(call.name, call.args, call.kwargs, state)
 
         case resume_from(snapshot, result, state) do
@@ -270,7 +289,7 @@ defmodule ExMonty.Sandbox do
         end
 
       {:os_call, %ExMonty.OsCall{} = call, snapshot, output} ->
-        acc_output = acc_output <> output
+        acc_output = [output | acc_output]
         {state, result} = dispatch_os(call.function, call.args, call.kwargs, state)
 
         case resume_from(snapshot, result, state) do
@@ -281,25 +300,12 @@ defmodule ExMonty.Sandbox do
             {:error, reason}
         end
 
-      {:resolve_futures, futures, output} ->
-        acc_output = acc_output <> output
-        ids = ExMonty.pending_call_ids(futures)
-
-        results =
-          Enum.map(ids, fn id ->
-            {id, {:ok, nil}}
-          end)
-
-        case resume_futures_from(futures, results, state) do
-          {:ok, next_progress} ->
-            loop(next_progress, state, acc_output)
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+      {:resolve_futures, _futures, _output} ->
+        {:error,
+         "Sandbox.run/2 cannot resolve pending futures; use the low-level start/resume API"}
 
       {:complete, value, output} ->
-        {:ok, value, acc_output <> output}
+        {:ok, value, acc_output |> Enum.reverse([output]) |> IO.iodata_to_binary()}
     end
   end
 
@@ -309,16 +315,12 @@ defmodule ExMonty.Sandbox do
         {:ok, {:function, name}}
 
       state.handler != nil and function_exported?(state.handler, :handle_name_lookup, 1) ->
-        try do
-          state.handler.handle_name_lookup(name)
-        rescue
-          e -> {:error, :runtime_error, Exception.message(e)}
-        end
-        |> case do
-          {:ok, _} = ok -> ok
-          :undefined -> :undefined
-          {:error, _, _} = err -> err
-          _ -> :undefined
+        case invoke_callback(
+               fn -> state.handler.handle_name_lookup(name) end,
+               state.callback_timeout
+             ) do
+          {:ok, result} -> normalize_name_lookup_result(result)
+          {:error, _, _} = error -> error
         end
 
       state.handler != nil and function_exported?(state.handler, :handle_function, 3) ->
@@ -333,20 +335,22 @@ defmodule ExMonty.Sandbox do
   defp dispatch_function(name, args, kwargs, state) do
     cond do
       Map.has_key?(state.functions, name) ->
-        try do
-          state.functions[name].(args, kwargs)
-        rescue
-          e -> {:error, :runtime_error, Exception.message(e)}
+        case invoke_callback(
+               fn -> state.functions[name].(args, kwargs) end,
+               state.callback_timeout
+             ) do
+          {:ok, result} -> normalize_handler_result(result)
+          {:error, _, _} = error -> error
         end
-        |> normalize_handler_result()
 
       state.handler != nil and function_exported?(state.handler, :handle_function, 3) ->
-        try do
-          state.handler.handle_function(name, args, kwargs)
-        rescue
-          e -> {:error, :runtime_error, Exception.message(e)}
+        case invoke_callback(
+               fn -> state.handler.handle_function(name, args, kwargs) end,
+               state.callback_timeout
+             ) do
+          {:ok, result} -> normalize_handler_result(result)
+          {:error, _, _} = error -> error
         end
-        |> normalize_handler_result()
 
       true ->
         {:error, :name_error, "function '#{name}' is not defined"}
@@ -372,24 +376,18 @@ defmodule ExMonty.Sandbox do
           {new_fs, normalize_handler_result(result)}
 
         is_map(os) and Map.has_key?(os, function) ->
-          result =
-            try do
-              os[function].(args, kwargs)
-            rescue
-              e -> {:error, :runtime_error, Exception.message(e)}
-            end
+          result = invoke_callback(fn -> os[function].(args, kwargs) end, state.callback_timeout)
 
-          {os, normalize_handler_result(result)}
+          {os, normalize_callback_result(result)}
 
         state.handler != nil and function_exported?(state.handler, :handle_os, 3) ->
           result =
-            try do
-              state.handler.handle_os(function, args, kwargs)
-            rescue
-              e -> {:error, :runtime_error, Exception.message(e)}
-            end
+            invoke_callback(
+              fn -> state.handler.handle_os(function, args, kwargs) end,
+              state.callback_timeout
+            )
 
-          {os, normalize_handler_result(result)}
+          {os, normalize_callback_result(result)}
 
         # When a mount lease is active, defer to upstream's
         # OsFunction::on_no_handler (PermissionError on FS, RuntimeError
@@ -411,25 +409,175 @@ defmodule ExMonty.Sandbox do
   defp resume_from(snapshot, result, %{lease: lease}),
     do: ExMonty.resume_with_mounts(snapshot, result, lease)
 
-  defp resume_futures_from(futures, results, %{lease: nil}),
-    do: ExMonty.resume_futures(futures, results)
-
-  defp resume_futures_from(futures, results, %{lease: lease}),
-    do: ExMonty.resume_futures_with_mounts(futures, results, lease)
-
   defp normalize_handler_result({:ok, _} = ok), do: ok
 
-  defp normalize_handler_result({:error, type, message}) when is_atom(type) do
-    {:error, type, to_string(message)}
+  defp normalize_handler_result({:error, type, message})
+       when is_atom(type) and is_binary(message) do
+    {:error, type, message}
   end
 
-  defp normalize_handler_result({:error, message}) do
-    {:error, :runtime_error, to_string(message)}
+  defp normalize_handler_result({:error, message}) when is_binary(message) do
+    {:error, :runtime_error, message}
   end
 
-  defp normalize_handler_result(other) do
-    {:error, :runtime_error, "handler returned invalid result: #{inspect(other)}"}
+  defp normalize_handler_result(_other) do
+    {:error, :runtime_error, "handler returned an invalid result"}
   end
+
+  defp normalize_name_lookup_result({:ok, _} = ok), do: ok
+  defp normalize_name_lookup_result(:undefined), do: :undefined
+
+  defp normalize_name_lookup_result({:error, type, message})
+       when is_atom(type) and is_binary(message),
+       do: {:error, type, message}
+
+  defp normalize_name_lookup_result(_other),
+    do: {:error, :runtime_error, "name lookup handler returned an invalid result"}
+
+  defp normalize_callback_result({:ok, result}), do: normalize_handler_result(result)
+  defp normalize_callback_result({:error, _, _} = error), do: error
+
+  defp validate_callback_timeout(:infinity), do: :ok
+
+  defp validate_callback_timeout(timeout) when is_integer(timeout) and timeout > 0,
+    do: :ok
+
+  defp validate_callback_timeout(_timeout),
+    do: {:error, "callback_timeout must be a positive integer or :infinity"}
+
+  # Execute foreign callback code outside the Sandbox.run/2 process. A tiny
+  # watchdog monitors both processes: if the caller dies, the worker is killed;
+  # if the worker exits (including an uncatchable `:kill`), the caller receives
+  # a normal Python RuntimeError instead of being taken down with it.
+  defp invoke_callback(fun, timeout) when is_function(fun, 0) do
+    parent = self()
+    token = make_ref()
+
+    {worker, monitor} =
+      spawn_monitor(fn ->
+        callback_worker(parent, token, fun)
+      end)
+
+    deadline =
+      case timeout do
+        :infinity -> :infinity
+        milliseconds -> System.monotonic_time(:millisecond) + milliseconds
+      end
+
+    await_callback(worker, monitor, token, deadline, timeout)
+  end
+
+  defp callback_worker(parent, token, fun) do
+    worker = self()
+    watchdog = spawn(fn -> callback_watchdog(parent, worker) end)
+
+    receive do
+      {:callback_watchdog_ready, ^watchdog} -> :ok
+    end
+
+    result =
+      try do
+        {:returned, fun.()}
+      rescue
+        exception -> {:raised, safe_exception_message(exception)}
+      catch
+        kind, reason -> {:caught, kind, safe_inspect(reason)}
+      end
+
+    send(parent, {:ex_monty_callback_done, token, result})
+  end
+
+  defp callback_watchdog(parent, worker) do
+    parent_monitor = Process.monitor(parent)
+    worker_monitor = Process.monitor(worker)
+    send(worker, {:callback_watchdog_ready, self()})
+
+    receive do
+      {:DOWN, ^parent_monitor, :process, ^parent, _reason} ->
+        Process.exit(worker, :kill)
+
+      {:DOWN, ^worker_monitor, :process, ^worker, _reason} ->
+        :ok
+    end
+  end
+
+  defp await_callback(worker, monitor, token, :infinity, _original_timeout) do
+    receive do
+      {:ex_monty_callback_done, ^token, result} ->
+        Process.demonitor(monitor, [:flush])
+        callback_outcome(result)
+
+      {:DOWN, ^monitor, :process, ^worker, _reason} ->
+        {:error, :runtime_error, "callback process exited before returning"}
+    end
+  end
+
+  defp await_callback(worker, monitor, token, deadline, original_timeout) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:ex_monty_callback_done, ^token, result} ->
+        Process.demonitor(monitor, [:flush])
+        callback_outcome(result)
+
+      {:DOWN, ^monitor, :process, ^worker, _reason} ->
+        {:error, :runtime_error, "callback process exited before returning"}
+    after
+      remaining ->
+        Process.exit(worker, :kill)
+
+        receive do
+          {:DOWN, ^monitor, :process, ^worker, _reason} -> :ok
+        end
+
+        # If the callback raced the deadline, its completion signal precedes
+        # the worker's DOWN signal. Remove that stale, now-ignored reply so it
+        # cannot leak into the caller mailbox after a timeout.
+        receive do
+          {:ex_monty_callback_done, ^token, _result} -> :ok
+        after
+          0 -> :ok
+        end
+
+        {:error, :timeout_error, "callback timed out after #{original_timeout} ms"}
+    end
+  end
+
+  defp callback_outcome({:returned, value}), do: {:ok, value}
+  defp callback_outcome({:raised, message}), do: {:error, :runtime_error, message}
+
+  defp callback_outcome({:caught, kind, reason}) do
+    {:error, :runtime_error, "callback #{kind}: #{reason}"}
+  end
+
+  defp safe_exception_message(exception) do
+    try do
+      exception
+      |> Exception.message()
+      |> bounded_message()
+    rescue
+      _ -> "callback raised an exception"
+    catch
+      _, _ -> "callback raised an exception"
+    end
+  end
+
+  defp safe_inspect(term) do
+    try do
+      term
+      |> inspect(limit: 20, printable_limit: 200, width: 80, structs: false)
+      |> bounded_message()
+    rescue
+      _ -> "unprintable callback reason"
+    catch
+      _, _ -> "unprintable callback reason"
+    end
+  end
+
+  defp bounded_message(message) when is_binary(message),
+    do: String.slice(message, 0, @max_callback_error_chars)
+
+  defp bounded_message(_message), do: "invalid callback error message"
 
   defp normalize_function_handlers(functions) when is_map(functions) do
     Enum.into(functions, %{}, fn {k, v} -> {to_string(k), v} end)
