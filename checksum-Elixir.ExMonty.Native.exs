@@ -1,6 +1,6 @@
 %{
-  "libex_monty-v0.4.0-nif-2.15-aarch64-apple-darwin.so.tar.gz" => "sha256:2ba968fd11e505b87de547ffc889e30067f945b6d2cd9465e2a148a9205ade30",
-  "libex_monty-v0.4.0-nif-2.15-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:afdf6e3b4e84238ff5435dd717c144f63ecae547f5af298fc40c1ca33f822503",
-  "libex_monty-v0.4.0-nif-2.15-x86_64-apple-darwin.so.tar.gz" => "sha256:7d2eab02daf19698bcee73ccdb791bc6615d3d671060baa2fe28a65f596dd41a",
-  "libex_monty-v0.4.0-nif-2.15-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:10b3530c95c2b1d3f4d47a868e560783b00e562d42657ee757b25396410c1609",
+  "libex_monty-v0.5.2-nif-2.15-aarch64-apple-darwin.so.tar.gz" => "sha256:618543708ac8b0515b564c7901a91363b1af331f1ae92c303fd55ac10de8e0b6",
+  "libex_monty-v0.5.2-nif-2.15-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:e763f70b293afe8d1daa32e06a0fd14682cbc25f0e9d57ffbb3fb2e65d90c6d8",
+  "libex_monty-v0.5.2-nif-2.15-x86_64-apple-darwin.so.tar.gz" => "sha256:6a4edaa2b5e069019ec7fdacf1e83098296047b34f115c14ad2d5af702c6bf6a",
+  "libex_monty-v0.5.2-nif-2.15-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:d2f01fb4d865919e6c54ab048269db84efb237edfa457a75a064e076727d001f",
 }
