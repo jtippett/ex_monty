@@ -1,6 +1,7 @@
 mod error;
 mod interactive;
 mod mounts;
+mod output;
 mod resources;
 mod serialization;
 mod types;
@@ -34,17 +35,15 @@ fn run<'a>(
     let runner_ref = runner.runner();
     let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
     let resource_limits = types::decode_resource_limits(limits)?;
+    let output_budget = output::OutputBudget::from_limits(&resource_limits);
     let tracker = LimitedTracker::new(resource_limits);
-    let mut output = String::new();
+    let mut output = output_budget.collector();
 
     let result = runner_ref
-        .run(
-            monty_inputs,
-            tracker,
-            PrintWriter::CollectString(&mut output),
-        )
+        .run(monty_inputs, tracker, PrintWriter::Callback(&mut output))
         .map_err(error::monty_exception_to_rustler_error)?;
 
+    let (output, _budget) = output.finish();
     let result_term = types::encode_monty_object(env, &result)?;
     let output_term = output.encode(env);
     Ok(rustler::types::tuple::make_tuple(

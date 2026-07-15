@@ -76,7 +76,11 @@ jobs:
 
       - name: Clippy
         working-directory: native/ex_monty
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        working-directory: native/ex_monty
+        run: cargo test --all-targets
 
       - name: Run tests
         run: mix test

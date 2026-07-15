@@ -87,6 +87,8 @@ case progress do
     # call.name == "fetch", call.args == ["https://example.com"]
     response = do_fetch(call.args)
     {:ok, next} = ExMonty.resume(snapshot, {:ok, response})
+    # For asynchronous host work, use `:pending` instead and resolve by call ID:
+    # {:ok, next} = ExMonty.resume(snapshot, :pending)
 
   {:name_lookup, name, snapshot, output} ->
     # Provide a function object or value for the undefined name
@@ -95,6 +97,12 @@ case progress do
   {:os_call, call, snapshot, output} ->
     # call.function == :read_text, call.args == [{:path, "/some/file"}]
     {:ok, next} = ExMonty.resume(snapshot, {:ok, file_content})
+
+  {:resolve_futures, futures, output} ->
+    results =
+      for id <- ExMonty.pending_call_ids(futures), do: {id, {:ok, await_result(id)}}
+
+    {:ok, next} = ExMonty.resume_futures(futures, results)
 
   {:complete, value, output} ->
     value
@@ -131,6 +139,22 @@ end
 
 {:ok, result, _output} = ExMonty.Sandbox.run(code, handler: MyHandler)
 ```
+
+Sandbox callbacks run in isolated monitored processes. By default each callback
+has 10 seconds to return; configure this with `callback_timeout:` (a positive
+millisecond count, or `:infinity`). Raises, throws, exits, brutal worker
+termination, and timeouts become Python errors instead of taking down the
+`Sandbox.run/2` caller. Because callbacks are isolated, `self()` and the process
+dictionary refer to the callback worker; use an Agent, server, ETS table, or
+another explicit shared-state mechanism when state must persist across calls.
+Likewise, code that coordinates a blocking callback should send messages to the
+worker PID returned by `self()` inside that callback, not to the sandbox caller.
+
+This isolation contains ordinary BEAM callbacks. It does **not** cancel a
+non-cooperative native NIF that a callback itself invokes — for example a nested
+`run` NIF executing an unbounded loop on a dirty scheduler — nor
+unlinked processes a callback spawns; the BEAM cannot forcibly stop either on
+timeout. Keep callback code cooperative and avoid spawning unlinked work from it.
 
 ## Pseudo Filesystem
 
@@ -613,12 +637,13 @@ and creates the GitHub release.
 
 Then **approve the publish**: open the workflow run → *Review deployments* →
 approve the **`hex`** environment. On approval it generates
-`checksum-Elixir.ExMonty.Native.exs` from the released artifacts and runs
-`mix hex.publish`.
+`checksum-Elixir.ExMonty.Native.exs` from the released artifacts, commits that
+file back to `master`, and only then runs `mix hex.publish`. The push is
+fast-forward-only, so publishing stops if `master` moved after the release tag.
 
 Keep notes under `## [Unreleased]` in `CHANGELOG.md` as you work — the assistant
-rolls them into each release. Don't commit the checksum file or move a published
-tag by hand; the pipeline owns both. See
+rolls them into each release. Don't generate or commit the checksum file by hand,
+and never move a published tag; the pipeline owns both. See
 [`UPDATE_PROCEDURE.md`](UPDATE_PROCEDURE.md) for bumping the pinned monty version.
 
 ## License

@@ -112,6 +112,24 @@ defmodule ExMonty.SandboxTest do
 
       assert output =~ "hello"
     end
+
+    test "preserves output order across many callback pauses" do
+      code = """
+      print('before')
+      first()
+      print('middle')
+      second()
+      print('after')
+      """
+
+      functions = %{
+        "first" => fn _, _ -> {:ok, nil} end,
+        "second" => fn _, _ -> {:ok, nil} end
+      }
+
+      assert {:ok, nil, "before\nmiddle\nafter\n"} =
+               ExMonty.Sandbox.run(code, functions: functions)
+    end
   end
 
   describe "multiple sequential calls" do
@@ -260,6 +278,126 @@ defmodule ExMonty.SandboxTest do
 
       {:ok, result, _output} = ExMonty.Sandbox.run(code, functions: functions)
       assert result == "boom"
+    end
+
+    test "handler throw and exit become Python errors" do
+      for {name, handler} <- [
+            {"thrower", fn _args, _kwargs -> throw(:boom) end},
+            {"exiter", fn _args, _kwargs -> exit(:boom) end}
+          ] do
+        code = """
+        try:
+            #{name}()
+        except RuntimeError as e:
+            result = str(e)
+        result
+        """
+
+        assert {:ok, result, ""} =
+                 ExMonty.Sandbox.run(code, functions: %{name => handler})
+
+        assert result =~ "boom"
+      end
+    end
+
+    test "a handler that brutal-kills itself cannot kill the sandbox caller" do
+      handler = fn _args, _kwargs -> Process.exit(self(), :kill) end
+
+      code = """
+      try:
+          terminate()
+      except RuntimeError as e:
+          result = str(e)
+      result
+      """
+
+      assert {:ok, result, ""} =
+               ExMonty.Sandbox.run(code, functions: %{"terminate" => handler})
+
+      assert result =~ "exited before returning"
+      assert {:ok, 2, ""} = ExMonty.Sandbox.run("1 + 1")
+    end
+
+    test "callback timeout kills work and prevents late effects" do
+      parent = self()
+
+      handler = fn _args, _kwargs ->
+        Process.sleep(100)
+        send(parent, :late_callback_effect)
+        {:ok, 1}
+      end
+
+      code = """
+      try:
+          slow()
+      except TimeoutError as e:
+          result = str(e)
+      result
+      """
+
+      assert {:ok, "callback timed out after 10 ms", ""} =
+               ExMonty.Sandbox.run(code,
+                 functions: %{"slow" => handler},
+                 callback_timeout: 10
+               )
+
+      refute_receive :late_callback_effect, 150
+    end
+
+    test "caller death cancels an in-flight callback worker" do
+      test_process = self()
+
+      handler = fn _args, _kwargs ->
+        send(test_process, {:callback_started, self()})
+        Process.sleep(5_000)
+        send(test_process, :orphaned_callback_effect)
+        {:ok, 1}
+      end
+
+      runner =
+        spawn(fn ->
+          ExMonty.Sandbox.run("slow()",
+            functions: %{"slow" => handler},
+            callback_timeout: :infinity
+          )
+        end)
+
+      runner_monitor = Process.monitor(runner)
+      assert_receive {:callback_started, worker}, 1_000
+      worker_monitor = Process.monitor(worker)
+
+      Process.exit(runner, :kill)
+
+      assert_receive {:DOWN, ^runner_monitor, :process, ^runner, :killed}, 1_000
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 1_000
+      refute_receive :orphaned_callback_effect, 50
+    end
+
+    test "invalid callback timeout is rejected before execution" do
+      assert {:error, "callback_timeout must be a positive integer or :infinity"} =
+               ExMonty.Sandbox.run("1 + 1", callback_timeout: 0)
+    end
+
+    defmodule RaisingLookupHandler do
+      @behaviour ExMonty.Sandbox
+
+      @impl true
+      def handle_function(name, _args, _kwargs),
+        do: {:error, :name_error, "unknown function: #{name}"}
+
+      @impl true
+      def handle_name_lookup(_name), do: raise("lookup exploded")
+    end
+
+    test "a raising name-lookup handler surfaces its real error, not a decode failure" do
+      # Monty has no error variant for name lookups; the sandbox must not feed
+      # the handler error into resume/2 (which would reject it as a malformed
+      # name-lookup result) but surface the underlying reason instead.
+      assert {:error, message} =
+               ExMonty.Sandbox.run("undefined_symbol", handler: RaisingLookupHandler)
+
+      assert message =~ "lookup exploded"
+      refute message =~ "must be :undefined"
     end
 
     test "sandbox with resource limits" do

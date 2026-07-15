@@ -15,7 +15,6 @@ defmodule ExMonty.OsCall do
       `"w"`, `"a"`, `"rb"`, ...). A handler servicing `:open` returns a
       `{:file_handle, %{path: path, mode: mode, position: pos}}` value.
     * `:kwargs` - map of keyword arguments
-    * `:kwargs` - map of keyword arguments
     * `:call_id` - unique identifier for this call within the execution
   """
 

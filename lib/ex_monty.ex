@@ -146,6 +146,9 @@ defmodule ExMonty do
         runner when is_reference(runner) -> {:ok, runner}
       end
     end
+  rescue
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -175,8 +178,8 @@ defmodule ExMonty do
       {result, output} when is_binary(output) -> {:ok, result, output}
     end
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -259,15 +262,19 @@ defmodule ExMonty do
       progress when is_tuple(progress) -> {:ok, progress}
     end
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
   Resumes interactive execution from a snapshot with a result value.
 
   For `:function_call`, `:method_call`, and `:os_call` snapshots, the result
-  should be `{:ok, value}` for successful returns or `{:error, type, message}` for errors.
+  must be `{:ok, value}` for successful returns or
+  `{:error, type, message}` for errors. Bare values and malformed tuples are
+  rejected without consuming the snapshot. For a `:function_call` that will be
+  resolved asynchronously, pass `:pending`; execution eventually yields
+  `{:resolve_futures, future_snapshot, output}`.
 
   For `:name_lookup` snapshots, the result should be:
     * `{:ok, {:function, name}}` — provide a callable function object
@@ -279,12 +286,13 @@ defmodule ExMonty do
       # Function call result
       {:ok, next_progress} = ExMonty.resume(snapshot, {:ok, "response body"})
       {:ok, next_progress} = ExMonty.resume(snapshot, {:error, :runtime_error, "fetch failed"})
+      {:ok, next_progress} = ExMonty.resume(snapshot, :pending)
 
       # Name lookup result
       {:ok, next_progress} = ExMonty.resume(snapshot, {:ok, {:function, "my_func"}})
       {:ok, next_progress} = ExMonty.resume(snapshot, :undefined)
   """
-  @spec resume(snapshot(), {:ok, term()} | {:error, atom(), String.t()} | :undefined) ::
+  @spec resume(snapshot(), {:ok, term()} | {:error, atom(), String.t()} | :undefined | :pending) ::
           {:ok, progress()} | {:error, error_reason()}
   def resume(snapshot, result) do
     case Native.resume(snapshot, result) do
@@ -293,8 +301,8 @@ defmodule ExMonty do
       progress when is_tuple(progress) -> {:ok, progress}
     end
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -318,8 +326,8 @@ defmodule ExMonty do
       progress when is_tuple(progress) -> {:ok, progress}
     end
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -337,8 +345,8 @@ defmodule ExMonty do
       progress when is_tuple(progress) -> {:ok, progress}
     end
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -358,14 +366,17 @@ defmodule ExMonty do
       progress when is_tuple(progress) -> {:ok, progress}
     end
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
   Resumes interactive execution from a future snapshot with results for pending calls.
 
-  Each result is a `{call_id, {:ok, value}}` or `{call_id, {:error, type, message}}` tuple.
+  Each result is a `{call_id, {:ok, value}}` or
+  `{call_id, {:error, type, message}}` tuple. A subset may be supplied for
+  incremental resolution. Unknown or duplicate IDs and malformed results are
+  rejected without consuming the future snapshot.
 
   ## Examples
 
@@ -382,8 +393,8 @@ defmodule ExMonty do
       progress when is_tuple(progress) -> {:ok, progress}
     end
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -412,8 +423,8 @@ defmodule ExMonty do
   def dump(runner) do
     {:ok, Native.dump_runner(runner)}
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -435,8 +446,8 @@ defmodule ExMonty do
   def load_runner(binary) do
     {:ok, Native.load_runner(binary)}
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -448,8 +459,8 @@ defmodule ExMonty do
   def dump_snapshot(snapshot) do
     {:ok, Native.dump_snapshot(snapshot)}
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -465,8 +476,8 @@ defmodule ExMonty do
   def load_snapshot(binary) do
     {:ok, Native.load_snapshot(binary)}
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -478,8 +489,8 @@ defmodule ExMonty do
   def dump_future_snapshot(futures) do
     {:ok, Native.dump_future_snapshot(futures)}
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   @doc """
@@ -494,8 +505,8 @@ defmodule ExMonty do
   def load_future_snapshot(binary) do
     {:ok, Native.load_future_snapshot(binary)}
   rescue
-    e in ErlangError ->
-      {:error, e.original}
+    e in [ErlangError, ArgumentError] ->
+      {:error, native_exception_reason(e)}
   end
 
   # Resolve the caller's `:limits` option into the value passed to the NIF.
@@ -511,6 +522,9 @@ defmodule ExMonty do
   # Anything else (a bad option value) passes through to the NIF, which rejects
   # it cleanly as a BadArg rather than raising a FunctionClauseError here.
   defp normalize_limits(other), do: other
+
+  defp native_exception_reason(%ErlangError{original: original}), do: original
+  defp native_exception_reason(%ArgumentError{} = error), do: Exception.message(error)
 
   defp validate_name_list(_label, []), do: :ok
 

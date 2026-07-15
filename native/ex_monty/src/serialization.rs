@@ -1,7 +1,12 @@
-use monty::{LimitedTracker, MontyRun};
+use monty::MontyRun;
 use rustler::{Binary, Env, NifResult, OwnedBinary, ResourceArc};
 
-use crate::resources::{FutureSnapshotResource, RunnerResource, SnapshotKind, SnapshotResource};
+use crate::resources::{
+    FutureSnapshotResource, FutureSnapshotState, RunnerResource, SnapshotResource, SnapshotState,
+};
+
+const SNAPSHOT_HEADER: &[u8] = b"EXMS\x01";
+const FUTURE_SNAPSHOT_HEADER: &[u8] = b"EXMF\x01";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RunnerDump {
@@ -43,17 +48,30 @@ fn dump_snapshot(env: Env, snapshot: ResourceArc<SnapshotResource>) -> NifResult
     let bytes = postcard::to_allocvec(&snap)
         .map_err(|e| rustler::Error::RaiseTerm(Box::new(format!("serialization error: {e}"))))?;
 
-    let mut binary = OwnedBinary::new(bytes.len())
+    encode_versioned(env, SNAPSHOT_HEADER, &bytes)
+}
+
+fn encode_versioned<'a>(env: Env<'a>, header: &[u8], bytes: &[u8]) -> NifResult<Binary<'a>> {
+    let total_len = header
+        .len()
+        .checked_add(bytes.len())
+        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("serialized snapshot is too large")))?;
+    let mut binary = OwnedBinary::new(total_len)
         .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("failed to allocate binary")))?;
-    binary.as_mut_slice().copy_from_slice(&bytes);
+    let (header_out, bytes_out) = binary.as_mut_slice().split_at_mut(header.len());
+    header_out.copy_from_slice(header);
+    bytes_out.copy_from_slice(bytes);
     Ok(binary.release(env))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn load_snapshot(binary: Binary) -> NifResult<ResourceArc<SnapshotResource>> {
-    let snap: SnapshotKind = postcard::from_bytes(binary.as_slice())
-        .map_err(|e| rustler::Error::RaiseTerm(Box::new(format!("deserialization error: {e}"))))?;
-    Ok(ResourceArc::new(SnapshotResource::new(snap)))
+    let bytes = strip_header(binary.as_slice(), SNAPSHOT_HEADER, "snapshot")?;
+    let snap: SnapshotState = decode_exact(bytes, "snapshot")?;
+    Ok(ResourceArc::new(SnapshotResource::new(
+        snap.snapshot,
+        snap.output_budget,
+    )))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -68,15 +86,37 @@ fn dump_future_snapshot(
     let bytes = postcard::to_allocvec(&snap)
         .map_err(|e| rustler::Error::RaiseTerm(Box::new(format!("serialization error: {e}"))))?;
 
-    let mut binary = OwnedBinary::new(bytes.len())
-        .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("failed to allocate binary")))?;
-    binary.as_mut_slice().copy_from_slice(&bytes);
-    Ok(binary.release(env))
+    encode_versioned(env, FUTURE_SNAPSHOT_HEADER, &bytes)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn load_future_snapshot(binary: Binary) -> NifResult<ResourceArc<FutureSnapshotResource>> {
-    let snap: monty::ResolveFutures<LimitedTracker> = postcard::from_bytes(binary.as_slice())
+    let bytes = strip_header(binary.as_slice(), FUTURE_SNAPSHOT_HEADER, "future snapshot")?;
+    let snap: FutureSnapshotState = decode_exact(bytes, "future snapshot")?;
+    Ok(ResourceArc::new(FutureSnapshotResource::new(
+        snap.snapshot,
+        snap.output_budget,
+    )))
+}
+
+/// Deserialize a postcard payload and reject any trailing bytes. `from_bytes`
+/// silently ignores unused input, so a valid dump with appended garbage would
+/// otherwise load as if it were intact.
+fn decode_exact<T: serde::de::DeserializeOwned>(bytes: &[u8], kind: &str) -> NifResult<T> {
+    let (value, rest) = postcard::take_from_bytes::<T>(bytes)
         .map_err(|e| rustler::Error::RaiseTerm(Box::new(format!("deserialization error: {e}"))))?;
-    Ok(ResourceArc::new(FutureSnapshotResource::new(snap)))
+    if !rest.is_empty() {
+        return Err(rustler::Error::RaiseTerm(Box::new(format!(
+            "unsupported or corrupt {kind} serialization format"
+        ))));
+    }
+    Ok(value)
+}
+
+fn strip_header<'a>(bytes: &'a [u8], header: &[u8], kind: &str) -> NifResult<&'a [u8]> {
+    bytes.strip_prefix(header).ok_or_else(|| {
+        rustler::Error::RaiseTerm(Box::new(format!(
+            "unsupported or corrupt {kind} serialization format"
+        )))
+    })
 }

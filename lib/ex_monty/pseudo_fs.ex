@@ -40,6 +40,9 @@ defmodule ExMonty.PseudoFS do
   | `Path.read_bytes()`       | `:read_bytes` |                                |
   | `Path.write_text(data)`   | `:write_text` | Creates parent dirs            |
   | `Path.write_bytes(data)`  | `:write_bytes`| Creates parent dirs            |
+  | text file `.write()` in append mode | `:append_text` | Creates file if missing |
+  | binary file `.write()` in append mode | `:append_bytes` | Creates file if missing |
+  | `open(path, mode)`        | `:open`       | Supports `r`, `w`, `a` and binary variants |
   | `Path.mkdir()`            | `:mkdir`      | Supports `parents`, `exist_ok` |
   | `Path.unlink()`           | `:unlink`     |                                |
   | `Path.rmdir()`            | `:rmdir`      | Must be empty                  |
@@ -59,7 +62,7 @@ defmodule ExMonty.PseudoFS do
           mtime: float()
         }
 
-  defstruct files: %{}, dirs: MapSet.new(), env: %{}, mtime: 1_700_000_000.0
+  defstruct files: %{}, dirs: MapSet.new(["/"]), env: %{}, mtime: 1_700_000_000.0
 
   @doc """
   Creates a new empty pseudo filesystem.
@@ -233,6 +236,48 @@ defmodule ExMonty.PseudoFS do
     new_fs = ensure_parent_dirs(fs, path)
     new_fs = %{new_fs | files: Map.put(new_fs.files, path, {content, 0o644})}
     {new_fs, {:ok, byte_size(content)}}
+  end
+
+  defp dispatch(fs, :append_text, [path, content | _], _kwargs) when is_binary(content) do
+    path = extract_path(path)
+    {existing, mode} = Map.get(fs.files, path, {"", 0o644})
+    new_fs = ensure_parent_dirs(fs, path)
+    new_fs = %{new_fs | files: Map.put(new_fs.files, path, {existing <> content, mode})}
+    {new_fs, {:ok, String.length(content)}}
+  end
+
+  defp dispatch(fs, :append_bytes, [path, {:bytes, content} | _], _kwargs)
+       when is_binary(content) do
+    append_bytes(fs, extract_path(path), content)
+  end
+
+  defp dispatch(fs, :append_bytes, [path, content | _], _kwargs) when is_binary(content) do
+    append_bytes(fs, extract_path(path), content)
+  end
+
+  defp dispatch(fs, :open, [path, mode | _], _kwargs) when mode in ["r", "rb"] do
+    path = extract_path(path)
+
+    if Map.has_key?(fs.files, path) do
+      {:ok, file_handle(path, mode)}
+    else
+      file_not_found(path)
+    end
+  end
+
+  defp dispatch(fs, :open, [path, mode | _], _kwargs) when mode in ["w", "wb"] do
+    path = extract_path(path)
+    {_existing, file_mode} = Map.get(fs.files, path, {"", 0o644})
+    new_fs = ensure_parent_dirs(fs, path)
+    new_fs = %{new_fs | files: Map.put(new_fs.files, path, {"", file_mode})}
+    {new_fs, {:ok, file_handle(path, mode)}}
+  end
+
+  defp dispatch(fs, :open, [path, mode | _], _kwargs) when mode in ["a", "ab"] do
+    path = extract_path(path)
+    new_fs = ensure_parent_dirs(fs, path)
+    files = Map.put_new(new_fs.files, path, {"", 0o644})
+    {%{new_fs | files: files}, {:ok, file_handle(path, mode)}}
   end
 
   defp dispatch(fs, :mkdir, [path | _], kwargs) do
@@ -411,6 +456,17 @@ defmodule ExMonty.PseudoFS do
 
   defp file_not_found(path) do
     {:error, :file_not_found_error, "[Errno 2] No such file or directory: '#{path}'"}
+  end
+
+  defp append_bytes(fs, path, content) do
+    {existing, mode} = Map.get(fs.files, path, {"", 0o644})
+    new_fs = ensure_parent_dirs(fs, path)
+    new_fs = %{new_fs | files: Map.put(new_fs.files, path, {existing <> content, mode})}
+    {new_fs, {:ok, byte_size(content)}}
+  end
+
+  defp file_handle(path, mode) do
+    {:file_handle, %{path: path, mode: mode, position: 0}}
   end
 
   defp ensure_parent_dirs(%__MODULE__{} = fs, path) do

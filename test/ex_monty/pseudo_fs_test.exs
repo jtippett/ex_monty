@@ -118,9 +118,44 @@ defmodule ExMonty.PseudoFSTest do
       {:ok, result, _} = ExMonty.Sandbox.run(code, os: fs)
       assert result == "written content"
     end
+
+    test "open supports write, append, and read modes" do
+      code = """
+      with open('/log.txt', 'w') as f:
+          f.write('first')
+      with open('/log.txt', 'a') as f:
+          f.write('-second')
+      with open('/log.txt', 'r') as f:
+          result = f.read()
+      result
+      """
+
+      assert {:ok, "first-second", ""} = ExMonty.Sandbox.run(code, os: PseudoFS.new())
+    end
+
+    test "open supports binary modes" do
+      code = """
+      with open('/data.bin', 'wb') as f:
+          f.write(b'abc')
+      with open('/data.bin', 'ab') as f:
+          f.write(b'def')
+      with open('/data.bin', 'rb') as f:
+          result = f.read()
+      result
+      """
+
+      assert {:ok, {:bytes, "abcdef"}, ""} = ExMonty.Sandbox.run(code, os: PseudoFS.new())
+    end
   end
 
   describe "directory operations" do
+    test "root directory exists in a new filesystem" do
+      assert {:ok, true, ""} =
+               ExMonty.Sandbox.run("from pathlib import Path\nPath('/').is_dir()",
+                 os: PseudoFS.new()
+               )
+    end
+
     test "iterdir lists directory contents" do
       fs =
         PseudoFS.new()

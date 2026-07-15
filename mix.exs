@@ -1,7 +1,7 @@
 defmodule ExMonty.MixProject do
   use Mix.Project
 
-  @version "0.5.0"
+  @version "0.5.1"
   @source_url "https://github.com/jtippett/ex_monty"
 
   def project do
@@ -39,14 +39,14 @@ defmodule ExMonty.MixProject do
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
       files:
-        ~w(lib native/ex_monty/Cargo.toml native/ex_monty/Cargo.lock native/ex_monty/src checksum-Elixir.ExMonty.Native.exs .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
+        ~w(lib native/ex_monty/Cargo.toml native/ex_monty/Cargo.lock native/ex_monty/src checksum-Elixir.ExMonty.Native.exs .formatter.exs mix.exs README.md CHANGELOG.md UPDATE_PROCEDURE.md LICENSE)
     ]
   end
 
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md"],
+      extras: ["README.md", "CHANGELOG.md", "UPDATE_PROCEDURE.md"],
       source_url: @source_url,
       source_ref: "v#{@version}"
     ]
