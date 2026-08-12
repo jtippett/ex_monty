@@ -8,7 +8,8 @@ defmodule ExMonty do
     * **Microsecond startup** — no Python runtime needed
     * **Interactive execution** — code pauses at external function calls, hands
       control to Elixir, and resumes with results
-    * **Resource limits** — control memory, CPU time, and recursion depth
+    * **Resource limits** — control execution time, recursion depth, and
+      large allocations (see `default_limits/0` for memory-limit caveats)
     * **Full type mapping** — Python types map naturally to Elixir types
 
   ## Quick Start
@@ -69,15 +70,30 @@ defmodule ExMonty do
   # explicit, deliberate opt-in (`limits: :unlimited`) rather than the default.
   # A caller-supplied map is merged over these, so specifying one limit doesn't
   # silently drop the others.
+  #
+  # NOTE on `:max_memory` since monty v0.0.21: upstream moved cumulative memory
+  # accounting into a custom global allocator (`monty-alloc`) that kills the
+  # process on breach — unusable inside the BEAM, so ExMonty does not install
+  # it. `:max_memory` still bounds individual large allocations (e.g.
+  # `2 ** 10_000_000` is rejected up front) and captured print output, but a
+  # loop accumulating many small objects is no longer stopped by it. Use
+  # `:max_duration_secs` (always enforced) as the primary defense, and
+  # supervise memory at the OS/BEAM level where hard guarantees are needed.
   @default_limits %{
     max_duration_secs: 10.0,
-    max_allocations: 100_000_000,
     max_memory: 512 * 1024 * 1024,
     max_recursion_depth: @safe_max_recursion_depth
   }
 
   @doc """
   Returns the default resource limits applied when `:limits` is omitted.
+
+  `:max_duration_secs` and `:max_recursion_depth` are always enforced.
+  `:max_memory` bounds individual large allocations and captured `print()`
+  output, but since monty v0.0.21 it no longer bounds cumulative heap growth
+  (upstream moved that into a process-killing allocator that ExMonty cannot
+  install inside the BEAM). Rely on `:max_duration_secs` as the primary
+  defense against runaway sandboxes.
   """
   @spec default_limits() :: map()
   def default_limits, do: @default_limits
@@ -96,7 +112,6 @@ defmodule ExMonty do
   @type error_reason :: term()
 
   @type limits :: %{
-          optional(:max_allocations) => non_neg_integer(),
           optional(:max_duration_secs) => float(),
           optional(:max_memory) => non_neg_integer(),
           optional(:gc_interval) => non_neg_integer(),

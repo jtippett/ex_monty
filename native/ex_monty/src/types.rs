@@ -1,4 +1,4 @@
-use monty::{
+use monty_types::{
     DictPairs, FileMode, MontyDate, MontyDateTime, MontyFileHandle, MontyObject, MontyTimeDelta,
     MontyTimeZone, OsFunctionCall, ResourceLimits,
 };
@@ -51,6 +51,7 @@ fn encode_monty_object_depth<'a>(
     }
     let term = match obj {
         MontyObject::None => rustler::types::atom::nil().encode(env),
+        MontyObject::NotImplemented => Atom::from_str(env, "not_implemented").unwrap().encode(env),
         MontyObject::Bool(b) => b.encode(env),
         MontyObject::Int(i) => i.encode(env),
         MontyObject::BigInt(bi) => bi.encode(env),
@@ -438,6 +439,7 @@ fn decode_monty_object_depth<'a>(
             "true" => Ok(MontyObject::Bool(true)),
             "false" => Ok(MontyObject::Bool(false)),
             "ellipsis" => Ok(MontyObject::Ellipsis),
+            "not_implemented" => Ok(MontyObject::NotImplemented),
             "infinity" => Ok(MontyObject::Float(f64::INFINITY)),
             "neg_infinity" => Ok(MontyObject::Float(f64::NEG_INFINITY)),
             "nan" => Ok(MontyObject::Float(f64::NAN)),
@@ -734,7 +736,7 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
     if term.is_atom() {
         let s = term.atom_to_string().map_err(|_| rustler::Error::BadArg)?;
         if matches!(s.as_str(), "nil" | "unlimited") {
-            return Ok(cap_recursion_depth(ResourceLimits::new()));
+            return Ok(cap_recursion_depth(ResourceLimits::default()));
         }
     }
 
@@ -746,16 +748,25 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
         )));
     }
 
-    let mut limits = ResourceLimits::new();
+    let mut limits = ResourceLimits::default();
     let env = term.get_env();
 
     // A *present* limit key with a malformed value is rejected, not silently
     // dropped: silently ignoring it would degrade the limit to "unlimited" and
-    // quietly weaken the sandbox. Absent keys keep their `ResourceLimits::new`
+    // quietly weaken the sandbox. Absent keys keep their `ResourceLimits`
     // default.
-    if let Ok(val) = term.map_get(Atom::from_str(env, "max_allocations").unwrap().encode(env)) {
-        let n: usize = val.decode().map_err(|_| invalid_limit("max_allocations"))?;
-        limits = limits.max_allocations(n);
+    //
+    // monty v0.0.21 removed allocation counting entirely (memory is bounded
+    // via `max_memory` instead). Accepting-and-ignoring `max_allocations`
+    // would pretend a limit is enforced when it isn't, so its presence is an
+    // error.
+    if term
+        .map_get(Atom::from_str(env, "max_allocations").unwrap().encode(env))
+        .is_ok()
+    {
+        return Err(rustler::Error::Term(Box::new(
+            "max_allocations is no longer supported (removed in monty v0.0.21); use max_memory",
+        )));
     }
 
     if let Ok(val) = term.map_get(
@@ -792,7 +803,7 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
         let n: usize = val
             .decode()
             .map_err(|_| invalid_limit("max_recursion_depth"))?;
-        limits = limits.max_recursion_depth(Some(n));
+        limits = limits.max_recursion_depth(n);
     }
 
     Ok(cap_recursion_depth(limits))
@@ -809,12 +820,10 @@ pub fn decode_resource_limits(term: Term) -> NifResult<ResourceLimits> {
 const SAFE_MAX_RECURSION_DEPTH: usize = 128;
 
 fn cap_recursion_depth(mut limits: ResourceLimits) -> ResourceLimits {
-    let capped = match limits.max_recursion_depth {
-        Some(d) => d.min(SAFE_MAX_RECURSION_DEPTH),
-        // `None` would mean unbounded recursion — never allowed.
-        None => SAFE_MAX_RECURSION_DEPTH,
-    };
-    limits.max_recursion_depth = Some(capped);
+    // Upstream's `max_recursion_depth` is now always-bounded (plain usize),
+    // but its default (1000) is still far past what the dirty-scheduler stack
+    // tolerates, so the NIF-level cap stays.
+    limits.max_recursion_depth = limits.max_recursion_depth.min(SAFE_MAX_RECURSION_DEPTH);
     limits
 }
 
@@ -858,7 +867,6 @@ pub fn encode_os_function<'a>(env: Env<'a>, func: &OsFunctionCall) -> Term<'a> {
         OsFunctionCall::GetEnviron => "get_environ",
         OsFunctionCall::DateToday => "date_today",
         OsFunctionCall::DateTimeNow(_) => "datetime_now",
-        OsFunctionCall::Used => "used",
     };
     Atom::from_str(env, name).unwrap().encode(env)
 }

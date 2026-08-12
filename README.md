@@ -409,18 +409,25 @@ disk).
 
 ## Resource Limits
 
-Control memory, execution time, allocations, and recursion depth:
+Control execution time, memory, and recursion depth:
 
 ```elixir
 {:ok, runner} = ExMonty.compile(code)
 
 {:ok, result, output} = ExMonty.run(runner, %{}, limits: %{
-  max_duration_secs: 5.0,       # wall-clock timeout
-  max_memory: 10_000_000,       # ~10MB memory limit
-  max_allocations: 100_000,     # heap allocation count limit
+  max_duration_secs: 5.0,       # execution-time budget (always enforced)
+  max_memory: 10_000_000,       # ~10MB memory limit (see note below)
   max_recursion_depth: 100      # call stack depth limit
 })
 ```
+
+> **Note on `:max_memory`:** since monty v0.0.21, cumulative heap accounting
+> lives in a custom allocator that cannot be installed inside the BEAM (it
+> terminates the process on breach). `:max_memory` still rejects individual
+> large allocations up front and caps captured `print()` output, but it no
+> longer stops a loop that accumulates many small objects. Treat
+> `:max_duration_secs` as the primary defense and supervise memory at the
+> OS level where hard guarantees are needed.
 
 When a limit is exceeded, execution stops and an error is returned:
 

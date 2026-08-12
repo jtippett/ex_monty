@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Updated monty from v0.0.18 to v0.0.21** (pinned to `70fe3f57`). Upstream
+  restructured its crates (`monty-types`, `monty-fs`) and reworked resource
+  accounting; ExMonty's API is unchanged except for the limit changes below.
+
+### New Python capabilities (from upstream)
+
+- User-defined classes, including `__init__`, methods, `__iter__`/`__next__`/
+  `__contains__` dispatch, and class/function decorators.
+- `@dataclass` classes defined inside the sandbox.
+- `collections` module: `deque`, `namedtuple`, `defaultdict`, `Counter`.
+- `itertools` module: `count`, `repeat`, `pairwise`, `compress`, `islice`,
+  `chain`, `cycle`.
+- `unicodedata` module, `str.encode`/`bytes.decode` codecs, `NotImplemented`
+  (surfaced to Elixir as `:not_implemented`), `iter(callable, sentinel)`,
+  star-unpacking of arbitrary iterables, multi-level closure capture,
+  pytest-style assert failure messages, `os.listdir`, and assorted f-string,
+  scoping, and argument-handling fixes.
+
+### Breaking
+
+- **`:max_allocations` is removed.** Upstream removed allocation counting
+  (monty #611); passing `:max_allocations` now returns a clear error rather
+  than silently not enforcing it. It is also gone from `default_limits/0`.
+- **`:max_memory` no longer bounds cumulative heap growth.** Upstream moved
+  cumulative memory accounting into a custom global allocator (`monty-alloc`)
+  that terminates the process on breach. That allocator is unusable inside the
+  BEAM (process-wide limits shared across concurrent runs; hard-limit breach
+  kills the node), so ExMonty does not install it. `:max_memory` still bounds
+  individual large allocations (e.g. `'x' * 600_000_000` is rejected up front)
+  and captured print output (ExMonty's own budget), but a loop accumulating
+  many small objects is no longer stopped by it. Use `:max_duration_secs`
+  (always enforced) as the primary defense against runaway sandboxes, and
+  supervise memory at the OS/BEAM level where hard guarantees are needed.
+- Snapshot and future-snapshot dumps from earlier versions are rejected (the
+  versioned header is bumped: monty's serialized execution state is
+  wire-incompatible across this update). Runner dumps from earlier versions
+  fail to load with a deserialization error.
+- The `{:allocation_limit, limit, count}` resource-error shape can no longer
+  occur.
+
+### Security / Hardening (from upstream)
+
+- Mount confinement is now enforced by the operating system: each mount holds
+  a `cap_std` directory descriptor opened once at mount time, and every
+  filesystem operation resolves relative to it, so symlink/`..` escapes are
+  refused by the kernel rather than by path arithmetic (monty #680, #576).
+- Interpreter-level bounding of pathological workloads: itertools adaptors,
+  dataclass equality, and class-body nesting are bounded by the recursion
+  limit; bytes substring search is linear and interruptible; the regex cache
+  bounds retained pattern text; print-collection buffers are capped upstream
+  as well (monty #685, #641, #643, #644, #624, #558).
+
 ## 0.5.1 - 2026-07-15
 
 ### Security / Hardening

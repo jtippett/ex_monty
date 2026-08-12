@@ -1,6 +1,8 @@
-use monty::{
-    ExtFunctionResult, LimitedTracker, MontyException, MontyObject, NameLookupResult, PrintWriter,
-    RunProgress,
+use monty::RunProgress;
+use monty_fs::MountCallOutcome;
+use monty_types::{
+    ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, OsFunctionCall,
+    PrintWriter, ResourceTracker,
 };
 use rustler::types::atom::Atom;
 use rustler::{Encoder, Env, NifResult, ResourceArc, Term};
@@ -40,7 +42,7 @@ fn apply_resume(
     snap: SnapshotKind,
     decoded: DecodedResume,
     print: PrintWriter,
-) -> Result<RunProgress<LimitedTracker>, MontyException> {
+) -> Result<RunProgress, MontyException> {
     match (snap, decoded) {
         (SnapshotKind::FunctionCall(call), DecodedResume::Ext(r)) => call.resume(r, print),
         (SnapshotKind::FunctionCall(call), DecodedResume::Pending) => call.resume_pending(print),
@@ -50,7 +52,7 @@ fn apply_resume(
         // the kind we peeked always matches the kind we took — these arms are
         // unreachable. Return a clean error rather than panic, just in case.
         _ => Err(MontyException::new(
-            monty::ExcType::RuntimeError,
+            ExcType::RuntimeError,
             Some("snapshot kind/result mismatch".to_string()),
         )),
     }
@@ -71,7 +73,7 @@ fn start<'a>(
     let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
     let resource_limits = types::decode_resource_limits(limits)?;
     let output_budget = OutputBudget::from_limits(&resource_limits);
-    let tracker = LimitedTracker::new(resource_limits);
+    let tracker = ResourceTracker::new(resource_limits);
     let mut output = output_budget.collector();
 
     let progress = monty_run
@@ -147,7 +149,7 @@ fn pending_call_ids(futures: ResourceArc<FutureSnapshotResource>) -> NifResult<V
 
 fn encode_run_progress<'a>(
     env: Env<'a>,
-    progress: RunProgress<LimitedTracker>,
+    progress: RunProgress,
     output: OutputCollector,
 ) -> NifResult<Term<'a>> {
     let (output, output_budget) = output.finish();
@@ -283,7 +285,7 @@ fn encode_function_call<'a>(
 
 fn encode_os_call<'a>(
     env: Env<'a>,
-    function: &monty::OsFunctionCall,
+    function: &OsFunctionCall,
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
     call_id: u32,
@@ -390,10 +392,10 @@ fn decode_name_lookup_result<'a>(env: Env<'a>, term: Term<'a>) -> NifResult<Name
     )))
 }
 
-fn parse_exc_type(s: &str) -> NifResult<monty::ExcType> {
+fn parse_exc_type(s: &str) -> NifResult<ExcType> {
     // Try parsing both snake_case and PascalCase
     use std::str::FromStr;
-    if let Ok(t) = monty::ExcType::from_str(s) {
+    if let Ok(t) = ExcType::from_str(s) {
         return Ok(t);
     }
     // Try converting from snake_case to PascalCase
@@ -410,14 +412,14 @@ fn parse_exc_type(s: &str) -> NifResult<monty::ExcType> {
             }
         })
         .collect::<String>();
-    if let Ok(t) = monty::ExcType::from_str(&pascal) {
+    if let Ok(t) = ExcType::from_str(&pascal) {
         return Ok(t);
     }
 
     // Acronym-preserving aliases produced by the Elixir-facing snake_case
     // convention cannot be reconstructed by the generic PascalCase helper.
     match s {
-        "os_error" | "o_s_error" => Ok(monty::ExcType::OSError),
+        "os_error" | "o_s_error" => Ok(ExcType::OSError),
         _ => Err(rustler::Error::Term(Box::new(format!(
             "unknown exception type: {s}"
         )))),
@@ -500,7 +502,7 @@ fn start_with_mounts<'a>(
     let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
     let resource_limits = types::decode_resource_limits(limits)?;
     let output_budget = OutputBudget::from_limits(&resource_limits);
-    let tracker = LimitedTracker::new(resource_limits);
+    let tracker = ResourceTracker::new(resource_limits);
     let mut output = output_budget.collector();
 
     let initial = monty_run
@@ -545,7 +547,7 @@ fn resume_with_mounts<'a>(
             // Kind was peeked as OsCall and `take` is one-shot, so this is
             // unreachable; surface a clean error instead of panicking.
             _ => Err(MontyException::new(
-                monty::ExcType::RuntimeError,
+                ExcType::RuntimeError,
                 Some("snapshot kind changed".to_string()),
             )),
         }
@@ -553,7 +555,7 @@ fn resume_with_mounts<'a>(
         match decoded {
             Some(decoded) => apply_resume(state.snapshot, decoded, print),
             None => Err(MontyException::new(
-                monty::ExcType::RuntimeError,
+                ExcType::RuntimeError,
                 Some("missing decoded callback result".to_string()),
             )),
         }
@@ -615,10 +617,10 @@ fn is_no_handler_atom(term: Term<'_>) -> bool {
 /// any non-OsCall progress arrives, or when an OsCall doesn't match any
 /// mount (non-FS or unmounted path).
 fn drive_with_mounts(
-    initial: RunProgress<LimitedTracker>,
+    initial: RunProgress,
     lease: &MountLease,
     output: &mut OutputCollector,
-) -> Result<RunProgress<LimitedTracker>, MontyException> {
+) -> Result<RunProgress, MontyException> {
     let mut guard = match lease.table.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -631,7 +633,7 @@ fn drive_with_mounts(
             // shouldn't happen under correct Sandbox.run flow, but be
             // defensive.
             return Err(MontyException::new(
-                monty::ExcType::RuntimeError,
+                ExcType::RuntimeError,
                 Some("mount lease has been released".to_string()),
             ));
         }
@@ -640,20 +642,28 @@ fn drive_with_mounts(
     let mut current = initial;
     loop {
         match current {
-            RunProgress::OsCall(call) => {
-                match table.handle_os_call(&call.function_call) {
-                    Some(Ok(obj)) => {
+            RunProgress::OsCall(mut call) => {
+                // `handle_os_call` takes the call by value so a covered
+                // write's payload moves into overlay storage without a copy.
+                // Swap in the cheapest unit variant as a placeholder; if the
+                // table doesn't cover the call it hands it back and we restore
+                // it before surfacing to Elixir.
+                let function_call =
+                    std::mem::replace(&mut call.function_call, OsFunctionCall::GetEnviron);
+                match table.handle_os_call(function_call) {
+                    MountCallOutcome::Handled(Ok(obj)) => {
                         let print = PrintWriter::Callback(output);
                         current = call.resume(ExtFunctionResult::Return(obj), print)?;
                     }
-                    Some(Err(mount_err)) => {
+                    MountCallOutcome::Handled(Err(mount_err)) => {
                         let exc = mount_err.into_exception();
                         let print = PrintWriter::Callback(output);
                         current = call.resume(ExtFunctionResult::Error(exc), print)?;
                     }
-                    None => {
+                    MountCallOutcome::NotHandled(function_call) => {
                         // Non-FS op or unmounted FS path — surface to
                         // Elixir so a fallback handler can take it.
+                        call.function_call = function_call;
                         return Ok(RunProgress::OsCall(call));
                     }
                 }

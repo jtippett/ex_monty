@@ -11,8 +11,14 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = { version = "0.37", features = ["big_integer"] }
-monty = { git = "https://github.com/pydantic/monty.git", rev = "45a3b2d57e6ce723fed4166fb032242ece74a663" }
+# Pinned to the commit v0.0.21 points at. For local development against a
+# monty checkout, swap the git deps for the path deps below.
+monty = { git = "https://github.com/pydantic/monty.git", rev = "70fe3f5781381eb33579e45046f8cb3845953373" }
+monty-types = { git = "https://github.com/pydantic/monty.git", rev = "70fe3f5781381eb33579e45046f8cb3845953373" }
+monty-fs = { git = "https://github.com/pydantic/monty.git", rev = "70fe3f5781381eb33579e45046f8cb3845953373" }
 # monty = { path = "../../../monty/crates/monty" }
+# monty-types = { path = "../../../monty/crates/monty-types" }
+# monty-fs = { path = "../../../monty/crates/monty-fs" }
 num-bigint = "0.4"
 postcard = { version = "1.1", features = ["alloc"] }
 

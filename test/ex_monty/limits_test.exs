@@ -27,15 +27,18 @@ defmodule ExMonty.LimitsTest do
       assert {:error, _} = result
     end
 
-    test "allocation limit" do
-      code = """
-      x = []
-      for i in range(1000000):
-          x.append([i] * 100)
-      """
+    # monty v0.0.21 removed allocation counting; a request for it must fail
+    # loudly rather than run with a limit the caller believes is enforced.
+    test "max_allocations is rejected with a clear error" do
+      {:ok, runner} = ExMonty.compile("1 + 1")
+      result = ExMonty.run(runner, %{}, limits: %{max_allocations: 10})
+      assert {:error, message} = result
+      assert message =~ "max_allocations"
+    end
 
-      {:ok, runner} = ExMonty.compile(code)
-      result = ExMonty.run(runner, %{}, limits: %{max_allocations: 10, max_memory: 500})
+    test "memory limit bounds a single large allocation" do
+      {:ok, runner} = ExMonty.compile("'x' * 10_000_000")
+      result = ExMonty.run(runner, %{}, limits: %{max_memory: 500_000})
       assert {:error, _} = result
     end
 
@@ -67,7 +70,6 @@ defmodule ExMonty.LimitsTest do
                  limits: %{
                    max_duration_secs: 5.0,
                    max_recursion_depth: 100,
-                   max_allocations: 10000,
                    max_memory: 100_000
                  }
                )

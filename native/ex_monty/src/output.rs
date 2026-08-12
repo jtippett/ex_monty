@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use monty::{ExcType, MontyException, PrintWriterCallback, ResourceLimits};
+use monty_types::{ExcType, MontyException, PrintWriterCallback, ResourceLimits};
 
 /// Cumulative print-output budget for one run, preserved across interactive
 /// snapshots. Monty's heap tracker does not account for `PrintWriter` buffers,

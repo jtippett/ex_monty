@@ -186,7 +186,6 @@ defmodule ExMonty.HardeningTest do
       limits = ExMonty.default_limits()
       assert is_map(limits)
       assert limits.max_duration_secs > 0
-      assert limits.max_allocations > 0
       assert limits.max_memory > 0
     end
 

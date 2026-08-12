@@ -15,7 +15,7 @@ use std::sync::{
     Mutex,
 };
 
-use monty::fs::{MountMode, MountTable, OverlayState};
+use monty_fs::{MountMode, MountTable, OverlayState};
 use rustler::{Atom, Encoder, Env, Resource, ResourceArc, Term};
 
 mod atoms {
@@ -265,8 +265,8 @@ pub fn mounts_add<'a>(
     }
 }
 
-fn classify_mount_error(err: &monty::fs::MountError) -> Atom {
-    use monty::fs::MountError;
+fn classify_mount_error(err: &monty_fs::MountError) -> Atom {
+    use monty_fs::MountError;
     match err {
         MountError::InvalidMount(msg) => {
             // Upstream's InvalidMount covers virtual-path validation, host
@@ -275,11 +275,12 @@ fn classify_mount_error(err: &monty::fs::MountError) -> Atom {
             // a generic invalid-virtual-path bucket — consistent with
             // upstream's own bucketing.
             let m = msg.to_lowercase();
-            if m.contains("does not exist") || m.contains("not found") {
+            if m.contains("does not exist") || m.contains("not found") || m.contains("no such file")
+            {
                 atoms::host_path_not_found()
             } else if m.contains("not a directory") || m.contains("is a file") {
                 atoms::host_path_not_directory()
-            } else if m.contains("canonical") {
+            } else if m.contains("canonical") || m.contains("cannot resolve") {
                 atoms::host_path_canonicalize_failed()
             } else {
                 atoms::invalid_virtual_path()

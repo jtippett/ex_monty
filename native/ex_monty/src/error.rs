@@ -1,4 +1,4 @@
-use monty::{MontyException, ResourceError};
+use monty_types::{MontyException, ResourceError};
 use rustler::{Encoder, Env, Term};
 
 /// Convert a MontyException to a Rustler error with a descriptive term.
@@ -82,7 +82,7 @@ pub fn encode_monty_exception<'a>(env: Env<'a>, exc: &MontyException) -> Term<'a
         .unwrap()
 }
 
-fn encode_stack_frame<'a>(env: Env<'a>, frame: &monty::StackFrame) -> Term<'a> {
+fn encode_stack_frame<'a>(env: Env<'a>, frame: &monty_types::StackFrame) -> Term<'a> {
     let struct_atom =
         rustler::types::atom::Atom::from_str(env, "Elixir.ExMonty.StackFrame").unwrap();
 
@@ -151,13 +151,6 @@ fn encode_stack_frame<'a>(env: Env<'a>, frame: &monty::StackFrame) -> Term<'a> {
 #[allow(dead_code)]
 fn encode_resource_error<'a>(env: Env<'a>, err: &ResourceError) -> Term<'a> {
     match err {
-        ResourceError::Allocation { limit, count } => {
-            let tag = rustler::types::atom::Atom::from_str(env, "allocation_limit").unwrap();
-            rustler::types::tuple::make_tuple(
-                env,
-                &[tag.encode(env), limit.encode(env), count.encode(env)],
-            )
-        }
         ResourceError::Time { limit, elapsed } => {
             let tag = rustler::types::atom::Atom::from_str(env, "time_limit").unwrap();
             let limit_secs = limit.as_secs_f64();
@@ -185,7 +178,6 @@ fn encode_resource_error<'a>(env: Env<'a>, err: &ResourceError) -> Term<'a> {
                 &[tag.encode(env), limit.encode(env), depth.encode(env)],
             )
         }
-        ResourceError::Exception(exc) => encode_monty_exception(env, exc),
     }
 }
 

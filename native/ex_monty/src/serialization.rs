@@ -5,8 +5,12 @@ use crate::resources::{
     FutureSnapshotResource, FutureSnapshotState, RunnerResource, SnapshotResource, SnapshotState,
 };
 
-const SNAPSHOT_HEADER: &[u8] = b"EXMS\x01";
-const FUTURE_SNAPSHOT_HEADER: &[u8] = b"EXMF\x01";
+// Version 2: monty v0.0.21 restructured the serialized form of MontyRun and
+// the resumable snapshot types, so v1 payloads are wire-incompatible. Bumping
+// the header makes old dumps fail with a clean "unsupported format" error
+// instead of a garbled postcard decode.
+const SNAPSHOT_HEADER: &[u8] = b"EXMS\x02";
+const FUTURE_SNAPSHOT_HEADER: &[u8] = b"EXMF\x02";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RunnerDump {

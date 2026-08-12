@@ -1,4 +1,4 @@
-use monty::{FunctionCall, LimitedTracker, MontyRun, NameLookup, OsCall, ResolveFutures};
+use monty::{FunctionCall, MontyRun, NameLookup, OsCall, ResolveFutures};
 use rustler::Resource;
 use std::sync::{Mutex, MutexGuard};
 
@@ -49,9 +49,9 @@ impl Resource for RunnerResource {}
 /// or NameLookupResult.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum SnapshotKind {
-    FunctionCall(FunctionCall<LimitedTracker>),
-    OsCall(OsCall<LimitedTracker>),
-    NameLookup(NameLookup<LimitedTracker>),
+    FunctionCall(FunctionCall),
+    OsCall(OsCall),
+    NameLookup(NameLookup),
 }
 
 /// Serializable one-shot snapshot plus the print-output budget accumulated by
@@ -110,7 +110,7 @@ impl SnapshotResource {
 #[rustler::resource_impl]
 impl Resource for SnapshotResource {}
 
-/// Wrapper around ResolveFutures<LimitedTracker>.
+/// Wrapper around ResolveFutures.
 /// Uses Mutex<Option<...>> because resume consumes the snapshot.
 pub struct FutureSnapshotResource {
     snapshot: Mutex<Option<FutureSnapshotState>>,
@@ -118,12 +118,12 @@ pub struct FutureSnapshotResource {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct FutureSnapshotState {
-    pub snapshot: ResolveFutures<LimitedTracker>,
+    pub snapshot: ResolveFutures,
     pub output_budget: OutputBudget,
 }
 
 impl FutureSnapshotResource {
-    pub fn new(snapshot: ResolveFutures<LimitedTracker>, output_budget: OutputBudget) -> Self {
+    pub fn new(snapshot: ResolveFutures, output_budget: OutputBudget) -> Self {
         Self {
             snapshot: Mutex::new(Some(FutureSnapshotState {
                 snapshot,
@@ -140,7 +140,7 @@ impl FutureSnapshotResource {
     /// Access the snapshot without consuming it (for pending_call_ids).
     pub fn with<F, R>(&self, f: F) -> Option<R>
     where
-        F: FnOnce(&ResolveFutures<LimitedTracker>) -> R,
+        F: FnOnce(&ResolveFutures) -> R,
     {
         let guard = lock_recover(&self.snapshot);
         guard.as_ref().map(|state| f(&state.snapshot))
