@@ -582,6 +582,27 @@ ExMonty.eval("x.days", inputs: %{"x" => {:timedelta, %{days: 7, seconds: 0, micr
 # {:ok, 7, ""}
 ```
 
+### JSON-Safe Projection
+
+The output mapping above is faithful, not JSON-encodable: `MapSet`s, tuples,
+`{:bytes, _}`, and non-finite floats all crash JSON encoders. Hosts that
+serialize results (API responses, persisted tool-call records) can project a
+value onto JSON-safe terms with `ExMonty.Value.to_json_safe/1`:
+
+```elixir
+{:ok, value, _output} = ExMonty.eval("{(1, 2), (3, 4)}")
+ExMonty.Value.to_json_safe(value)
+# [[1, 2], [3, 4]]
+```
+
+The projection is lossy but legible, following `json.dumps` conventions where
+Python has them: sets → sorted lists, tuples → lists, bytes → the string
+itself when valid UTF-8 (else Base64), dates/datetimes → ISO 8601 strings,
+`NaN`/infinities → `"NaN"`/`"Infinity"`/`"-Infinity"`, dataclasses and named
+tuples → field maps, and non-string dict keys → `"null"`/`"true"`/`"1"`-style
+strings. The result contains only `nil`, booleans, numbers, UTF-8 strings,
+lists, and string-keyed maps.
+
 ## Error Handling
 
 Errors are returned as `{:error, %ExMonty.Exception{}}`:

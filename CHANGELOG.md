@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 - 2026-09-01
+
+### Added
+
+- **`ExMonty.Value.to_json_safe/1`** — projects a Monty output value onto
+  JSON-safe terms (only `nil`, booleans, numbers, UTF-8 strings, lists, and
+  string-keyed maps). Monty's faithful mapping is unchanged; this is an opt-in
+  lossy projection for hosts that serialize results, following `json.dumps`
+  conventions: sets → sorted lists, tuples → lists, bytes → UTF-8 string or
+  Base64, dates/datetimes → ISO 8601 strings, non-finite floats → `"NaN"` /
+  `"Infinity"` / `"-Infinity"`, non-string dict keys → strings.
+
 ## 0.6.0 - 2026-08-12
 
 ### Changed
