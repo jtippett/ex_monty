@@ -31,16 +31,24 @@ const MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct HostObjects {
-    by_id: HashMap<MontyUuid, (MontyObject, usize)>,
-    /// Insertion order, oldest first. May hold ids already replaced or
-    /// evicted; those are skipped on eviction.
-    order: VecDeque<MontyUuid>,
+    by_id: HashMap<MontyUuid, Entry>,
+    /// Insertion order, oldest first, as `(id, generation)`. A slot is live
+    /// only while its generation matches the entry's: replacing or evicting
+    /// an object leaves a stale slot behind instead of paying a linear scan.
+    order: VecDeque<(MontyUuid, u64)>,
     bytes: usize,
+    next_generation: u64,
+}
+
+struct Entry {
+    object: MontyObject,
+    size: usize,
+    generation: u64,
 }
 
 impl HostObjects {
     pub fn get(&self, id: &MontyUuid) -> Option<&MontyObject> {
-        self.by_id.get(id).map(|(object, _)| object)
+        self.by_id.get(id).map(|entry| &entry.object)
     }
 
     pub fn extend(&mut self, objects: impl IntoIterator<Item = (MontyUuid, MontyObject)>) {
@@ -49,26 +57,51 @@ impl HostObjects {
         }
     }
 
+    fn is_live(&self, slot: &(MontyUuid, u64)) -> bool {
+        self.by_id
+            .get(&slot.0)
+            .is_some_and(|entry| entry.generation == slot.1)
+    }
+
     pub fn insert(&mut self, id: MontyUuid, object: MontyObject) {
         let (graph, _) = unstable::graph_parts(&object);
         let size = graph.decoded_size();
-        if let Some((_, old_size)) = self.by_id.remove(&id) {
-            self.bytes -= old_size;
-            self.order.retain(|existing| existing != &id);
+        if let Some(old) = self.by_id.remove(&id) {
+            self.bytes -= old.size;
         }
         if size > MAX_BYTES {
             return;
         }
         while self.by_id.len() >= MAX_OBJECTS || self.bytes + size > MAX_BYTES {
-            let Some(oldest) = self.order.pop_front() else {
+            let Some(slot) = self.order.pop_front() else {
                 break;
             };
-            if let Some((_, old_size)) = self.by_id.remove(&oldest) {
-                self.bytes -= old_size;
+            if self.is_live(&slot) {
+                if let Some(old) = self.by_id.remove(&slot.0) {
+                    self.bytes -= old.size;
+                }
             }
         }
-        self.by_id.insert(id, (object, size));
-        self.order.push_back(id);
+        // Stale slots are bounded: drop them once they outnumber live ones.
+        if self.order.len() >= 2 * MAX_OBJECTS {
+            let by_id = &self.by_id;
+            self.order.retain(|slot| {
+                by_id
+                    .get(&slot.0)
+                    .is_some_and(|entry| entry.generation == slot.1)
+            });
+        }
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        self.by_id.insert(
+            id,
+            Entry {
+                object,
+                size,
+                generation,
+            },
+        );
+        self.order.push_back((id, generation));
         self.bytes += size;
     }
 
@@ -89,11 +122,10 @@ impl HostObjects {
 // rebuilt through `insert` so the caps hold for loaded data too.
 impl Serialize for HostObjects {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Exactly one live slot exists per entry, so the count is exact.
         let mut seq = serializer.serialize_seq(Some(self.by_id.len()))?;
-        for id in &self.order {
-            if let Some((object, _)) = self.by_id.get(id) {
-                seq.serialize_element(&(id, object))?;
-            }
+        for slot in self.order.iter().filter(|slot| self.is_live(slot)) {
+            seq.serialize_element(&(&slot.0, &self.by_id[&slot.0].object))?;
         }
         seq.end()
     }

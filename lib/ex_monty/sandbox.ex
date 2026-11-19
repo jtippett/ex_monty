@@ -88,8 +88,9 @@ defmodule ExMonty.Sandbox do
       }
 
   An `import` of a module the interpreter does not provide surfaces as an
-  `:import` os call (`[module_name, search_path]`); unhandled, it raises
-  `ModuleNotFoundError`.
+  `:import` os call (`[module_name, search_path]`). It is answered with
+  `ModuleNotFoundError` unless the `:os` map has an `:import` key; it is never
+  passed to a `PseudoFS` or to a handler module's `handle_os/3`.
 
   ## Host Filesystem Mounts
 
@@ -379,6 +380,17 @@ defmodule ExMonty.Sandbox do
 
     {new_os, result} =
       cond do
+        # Module resolution reaches the host as an OS call. Unless the caller
+        # explicitly supplied a handler for it in the `:os` map, the module
+        # simply does not exist: `:no_handler` makes the sandbox raise the
+        # ordinary `ModuleNotFoundError` (and report no stubs / type hints).
+        # It is deliberately not offered to a PseudoFS or a handler module's
+        # `handle_os/3` — neither was written to expect it, and an unrelated
+        # error from them would break `try: import x / except ImportError`.
+        function in [:import, :import_stubs, :get_type_hints] and
+            not (is_map(os) and not is_struct(os) and Map.has_key?(os, function)) ->
+          {os, :no_handler}
+
         is_struct(os, ExMonty.PseudoFS) ->
           {new_fs, result} =
             try do
@@ -410,13 +422,6 @@ defmodule ExMonty.Sandbox do
         # OsFunction::on_no_handler (PermissionError on FS, RuntimeError
         # on non-FS) by signalling :no_handler back to Rust.
         state.lease != nil ->
-          {os, :no_handler}
-
-        # Module resolution reaches the host as an OS call. With nobody to
-        # answer it the module simply does not exist: `:no_handler` makes the
-        # sandbox raise the ordinary `ModuleNotFoundError` (and report no
-        # stubs / type hints) instead of an `OSError`.
-        function in [:import, :import_stubs, :get_type_hints] ->
           {os, :no_handler}
 
         true ->

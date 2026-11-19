@@ -375,6 +375,54 @@ defmodule ExMonty.V160FeaturesTest do
                ExMonty.eval("import nosuch")
     end
 
+    test "a failed import can be caught whatever os backend is configured" do
+      code = """
+      try:
+          import yaml
+          r = 'imported'
+      except ImportError:
+          r = 'fallback'
+      r
+      """
+
+      defmodule GetenvOnly do
+        def handle_function(_name, _args, _kwargs), do: {:error, :name_error, "unknown"}
+        def handle_os(:getenv, _args, _kwargs), do: {:ok, "v"}
+      end
+
+      assert {:ok, "fallback", ""} = Sandbox.run(code)
+      assert {:ok, "fallback", ""} = Sandbox.run(code, os: PseudoFS.new())
+      assert {:ok, "fallback", ""} = Sandbox.run(code, handler: GetenvOnly)
+      assert {:ok, "fallback", ""} = Sandbox.run(code, os: %{getenv: fn _, _ -> {:ok, "v"} end})
+
+      # An explicit :import key in the os map is the one way to answer it.
+      assert {:error, :value_error, "blocked"} =
+               run_type("import yaml",
+                 os: %{import: fn _, _ -> {:error, :value_error, "blocked"} end}
+               )
+    end
+
+    test "re-sending many tracked objects keeps them all callable" do
+      users = for i <- 1..200, do: %ExMonty.Dataclass{name: "U", fields: %{"i" => i}}
+
+      code = """
+      total = 0
+      for _ in range(60):
+          us = echo(us)
+      for u in us:
+          total += u.val()
+      total
+      """
+
+      functions = %{
+        "echo" => fn [list], _ -> {:ok, list} end,
+        "val" => fn [%ExMonty.Dataclass{fields: %{"i" => i}}], _ -> {:ok, i} end
+      }
+
+      assert {:ok, 20_100, ""} =
+               Sandbox.run(code, inputs: %{"us" => users}, functions: functions)
+    end
+
     test ":no_handler in plain resume/2 raises the operation's default error" do
       {:ok, runner} = ExMonty.compile("import nosuch")
 
