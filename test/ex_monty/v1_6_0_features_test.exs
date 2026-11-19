@@ -418,16 +418,17 @@ defmodule ExMonty.V160FeaturesTest do
     end
 
     test "os.walk and os.scandir", %{fs: fs} do
-      assert {:ok,
-              [
-                {"/d", ["sub"], ["a.txt"]},
-                {"/d/sub", ["deep"], ["b.py"]},
-                {"/d/sub/deep", [], ["c.txt"]}
-              ], ""} =
+      assert {:ok, walked, ""} =
                Sandbox.run(
                  "import os\nsorted((r, sorted(d), sorted(f)) for r, d, f in os.walk('/d'))",
                  os: fs
                )
+
+      assert walked == [
+               {"/d", ["sub"], ["a.txt"]},
+               {"/d/sub", ["deep"], ["b.py"]},
+               {"/d/sub/deep", [], ["c.txt"]}
+             ]
 
       assert {:ok, [{"a.txt", false}, {"sub", true}], ""} =
                Sandbox.run(
