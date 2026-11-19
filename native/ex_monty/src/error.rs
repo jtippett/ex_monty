@@ -151,7 +151,7 @@ fn encode_stack_frame<'a>(env: Env<'a>, frame: &monty_types::StackFrame) -> Term
 #[allow(dead_code)]
 fn encode_resource_error<'a>(env: Env<'a>, err: &ResourceError) -> Term<'a> {
     match err {
-        ResourceError::Time { limit, elapsed } => {
+        ResourceError::Time { limit, elapsed, .. } => {
             let tag = rustler::types::atom::Atom::from_str(env, "time_limit").unwrap();
             let limit_secs = limit.as_secs_f64();
             let elapsed_secs = elapsed.as_secs_f64();

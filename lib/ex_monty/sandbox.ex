@@ -73,6 +73,24 @@ defmodule ExMonty.Sandbox do
         }
       )
 
+  The same applies to `time.time()` / `time.monotonic()` (`:time`, whose first
+  argument names the clock), `time.sleep()` (`:sleep`), `asyncio.sleep()`
+  (`:async_sleep`) and `os.urandom()` (`:urandom`). The sandbox never reads the
+  host clock, blocks, or draws host entropy by itself; without a handler these
+  raise `OSError`. A `:sleep` handler decides whether to actually wait:
+
+      os: %{
+        time: fn [_clock], _kwargs -> {:ok, System.os_time(:millisecond) / 1000} end,
+        sleep: fn [seconds], _kwargs ->
+          Process.sleep(round(min(seconds, 1.0) * 1000))
+          {:ok, nil}
+        end
+      }
+
+  An `import` of a module the interpreter does not provide surfaces as an
+  `:import` os call (`[module_name, search_path]`); unhandled, it raises
+  `ModuleNotFoundError`.
+
   ## Host Filesystem Mounts
 
   For sandboxed access to real host directories, pass an `ExMonty.Mount`
@@ -247,10 +265,9 @@ defmodule ExMonty.Sandbox do
         acc_output = [output | acc_output]
 
         case resolve_name(name, state) do
-          # Monty has no error variant for name lookups, so a raising, timed-out,
-          # or error-returning handler cannot resume into a Python exception.
-          # Surface the real reason instead of the opaque strict-decode failure
-          # that passing an {:error, _, _} tuple to `resume/2` would produce.
+          # A raising, timed-out, or error-returning name-lookup handler ends
+          # the run with its reason rather than resuming into a Python
+          # exception the script could catch and carry on from.
           {:error, _type, message} ->
             {:error, message}
 
@@ -393,6 +410,13 @@ defmodule ExMonty.Sandbox do
         # OsFunction::on_no_handler (PermissionError on FS, RuntimeError
         # on non-FS) by signalling :no_handler back to Rust.
         state.lease != nil ->
+          {os, :no_handler}
+
+        # Module resolution reaches the host as an OS call. With nobody to
+        # answer it the module simply does not exist: `:no_handler` makes the
+        # sandbox raise the ordinary `ModuleNotFoundError` (and report no
+        # stubs / type hints) instead of an `OSError`.
+        function in [:import, :import_stubs, :get_type_hints] ->
           {os, :no_handler}
 
         true ->
@@ -600,7 +624,9 @@ defmodule ExMonty.Sandbox do
     "mkdir" => :mkdir,
     "unlink" => :unlink,
     "rmdir" => :rmdir,
+    "create_exclusive" => :create_exclusive,
     "iterdir" => :iterdir,
+    "scan" => :scan,
     "stat" => :stat,
     "rename" => :rename,
     "resolve" => :resolve,
@@ -608,7 +634,14 @@ defmodule ExMonty.Sandbox do
     "getenv" => :getenv,
     "get_environ" => :get_environ,
     "date_today" => :date_today,
-    "datetime_now" => :datetime_now
+    "datetime_now" => :datetime_now,
+    "time" => :time,
+    "urandom" => :urandom,
+    "sleep" => :sleep,
+    "async_sleep" => :async_sleep,
+    "import" => :import,
+    "import_stubs" => :import_stubs,
+    "get_type_hints" => :get_type_hints
   }
 
   defp normalize_os_handlers(%ExMonty.PseudoFS{} = fs), do: fs

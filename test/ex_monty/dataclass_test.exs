@@ -2,7 +2,7 @@ defmodule ExMonty.DataclassTest do
   use ExUnit.Case
 
   defp make_point do
-    %ExMonty.Dataclass{name: "Point", fields: %{"x" => 1, "y" => 2}, frozen: true}
+    %ExMonty.Dataclass{name: "Point", fields: %{"x" => 1, "y" => 2}}
   end
 
   defp make_mutable_point do
@@ -10,11 +10,11 @@ defmodule ExMonty.DataclassTest do
   end
 
   describe "dataclass struct" do
-    test "frozen dataclass struct" do
+    test "dataclass struct" do
       point = make_point()
       assert point.name == "Point"
       assert point.fields == %{"x" => 1, "y" => 2}
-      assert point.frozen == true
+      assert point.frozen == false
     end
 
     test "mutable dataclass struct" do
@@ -44,7 +44,7 @@ defmodule ExMonty.DataclassTest do
     test "dataclass field access via dot notation (p.x)" do
       functions = %{
         "make_point" => fn _args, _kwargs ->
-          {:ok, %ExMonty.Dataclass{name: "Point", fields: %{"x" => 10, "y" => 20}, frozen: true}}
+          {:ok, %ExMonty.Dataclass{name: "Point", fields: %{"x" => 10, "y" => 20}}}
         end
       }
 
@@ -60,7 +60,7 @@ defmodule ExMonty.DataclassTest do
     test "dataclass field access via dot notation - multiple fields" do
       functions = %{
         "make_point" => fn _args, _kwargs ->
-          {:ok, %ExMonty.Dataclass{name: "Point", fields: %{"x" => 10, "y" => 20}, frozen: true}}
+          {:ok, %ExMonty.Dataclass{name: "Point", fields: %{"x" => 10, "y" => 20}}}
         end
       }
 
@@ -73,25 +73,13 @@ defmodule ExMonty.DataclassTest do
       assert result == [10, 20]
     end
 
-    test "frozen dataclass rejects field assignment" do
-      functions = %{
-        "make_point" => fn _args, _kwargs ->
-          {:ok, %ExMonty.Dataclass{name: "Point", fields: %{"x" => 1, "y" => 2}, frozen: true}}
-        end
-      }
+    test "frozen: true is rejected (upstream no longer enforces it)" do
+      # monty v1 dropped the frozen flag at the boundary. Accepting it would
+      # pretend immutability is enforced, so it fails loudly instead.
+      frozen = %ExMonty.Dataclass{name: "Point", fields: %{"x" => 1}, frozen: true}
 
-      code = """
-      p = make_point()
-      try:
-          p.x = 99
-          result = "no error"
-      except AttributeError:
-          result = "frozen"
-      result
-      """
-
-      {:ok, result, _output} = ExMonty.Sandbox.run(code, functions: functions)
-      assert result == "frozen"
+      assert {:error, message} = ExMonty.eval("p.x", inputs: %{"p" => frozen})
+      assert message =~ "frozen dataclasses are no longer supported"
     end
 
     test "mutable dataclass allows field assignment" do
@@ -115,7 +103,7 @@ defmodule ExMonty.DataclassTest do
 
       functions = %{
         "make_point" => fn _args, _kwargs ->
-          {:ok, %ExMonty.Dataclass{name: "Point", fields: %{"x" => 1, "y" => 2}, frozen: true}}
+          {:ok, %ExMonty.Dataclass{name: "Point", fields: %{"x" => 1, "y" => 2}}}
         end,
         "inspect_it" => fn [val], _kwargs ->
           send(test_pid, {:received, val})
@@ -133,7 +121,9 @@ defmodule ExMonty.DataclassTest do
       assert dc.name == "Point"
       assert dc.fields["x"] == 1
       assert dc.fields["y"] == 2
-      assert dc.frozen == true
+      assert dc.frozen == false
+      assert is_binary(dc.id)
+      assert is_binary(dc.type_id)
     end
 
     test "dataclass in a list round-trips" do
@@ -158,8 +148,7 @@ defmodule ExMonty.DataclassTest do
           {:ok,
            %ExMonty.Dataclass{
              name: "Data",
-             fields: %{"items" => [1, 2, 3], "label" => "test"},
-             frozen: true
+             fields: %{"items" => [1, 2, 3], "label" => "test"}
            }}
         end
       }
@@ -179,8 +168,7 @@ defmodule ExMonty.DataclassTest do
           {:ok,
            %ExMonty.Dataclass{
              name: "User",
-             fields: %{"name" => name, "active" => true},
-             frozen: true
+             fields: %{"name" => name, "active" => true}
            }}
         end
       }
@@ -199,7 +187,7 @@ defmodule ExMonty.DataclassTest do
 
       functions = %{
         "make_empty" => fn _args, _kwargs ->
-          {:ok, %ExMonty.Dataclass{name: "Empty", fields: %{}, frozen: true}}
+          {:ok, %ExMonty.Dataclass{name: "Empty", fields: %{}}}
         end,
         "check" => fn [val], _kwargs ->
           send(test_pid, {:received, val})
@@ -210,7 +198,7 @@ defmodule ExMonty.DataclassTest do
       {:ok, _result, _output} =
         ExMonty.Sandbox.run("e = make_empty()\ncheck(e)", functions: functions)
 
-      assert_receive {:received, %ExMonty.Dataclass{name: "Empty", fields: fields, frozen: true}}
+      assert_receive {:received, %ExMonty.Dataclass{name: "Empty", fields: fields}}
       assert fields == %{}
     end
   end

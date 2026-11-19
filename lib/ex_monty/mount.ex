@@ -70,6 +70,7 @@ defmodule ExMonty.Mount do
           | :host_path_not_directory
           | :host_path_canonicalize_failed
           | :mount_in_use
+          | :overlapping_mounts
           | {:already_mounted, virtual :: String.t()}
 
   @type list_entry :: %{

@@ -56,17 +56,25 @@ Then review the implementation files behind our dependencies:
 ```bash
 # Our full API surface — review changes in these modules:
 git diff <OUR_PINNED_REV>..<TARGET_TAG> -- \
+  crates/monty/src/lib.rs \
   crates/monty/src/run.rs \
-  crates/monty/src/object.rs \
-  crates/monty/src/os.rs \
-  crates/monty/src/resource.rs \
-  crates/monty/src/exception_public.rs \
-  crates/monty/src/exception_private.rs \
-  crates/monty/src/io.rs \
   crates/monty/src/run_progress.rs \
-  crates/monty/src/fs/dispatch.rs \
-  crates/monty/src/fs/path_security.rs \
-  crates/monty/src/fs/mount_table.rs
+  crates/monty/src/object_bridge.rs \
+  crates/monty/src/dump_format.rs \
+  crates/monty-types/src/lib.rs \
+  crates/monty-types/src/graph.rs \
+  crates/monty-types/src/object.rs \
+  crates/monty-types/src/os.rs \
+  crates/monty-types/src/os_policy.rs \
+  crates/monty-types/src/scan.rs \
+  crates/monty-types/src/resource.rs \
+  crates/monty-types/src/results.rs \
+  crates/monty-types/src/exceptions.rs \
+  crates/monty-types/src/io.rs \
+  crates/monty-fs/src/lib.rs \
+  crates/monty-fs/src/dispatch.rs \
+  crates/monty-fs/src/path_security.rs \
+  crates/monty-fs/src/mount_table.rs
 ```
 
 For every update, explicitly re-check these security invariants rather than
@@ -74,7 +82,11 @@ relying on compilation: `PrintWriterCallback` output must remain fallible and
 budgeted by ExMonty; mount matching must be component-aware; host paths must be
 canonicalized; symlinks must not escape a mount; read-only and write quotas must
 fail closed; `resume_pending` and `ResolveFutures::resume` must preserve call-ID
-ownership and retry semantics.
+ownership and retry semantics; the `OsPolicy` ExMonty compiles with must keep
+the clock and sleeps routed to the host (`CallHost`), so the sandbox never
+blocks a dirty scheduler or reads host time on its own; and every new
+`MontyNode` kind must go through the bounded, non-recursive encoder in
+`types.rs` (depth and expanded-size caps).
 
 ### 1.4 Read the commit log for context
 
@@ -97,15 +109,16 @@ Changes to types/functions we directly use:
 | We use | Where in our code |
 |--------|-------------------|
 | `MontyRun::new()`, `.run()`, `.start()`, `.clone()` | `lib.rs`, `interactive.rs` |
-| `MontyObject` variants + encoding | `types.rs` (22KB — largest module) |
-| `OsFunction` variants | `types.rs`, `interactive.rs` |
+| `MontyObject` / `MontyNode` graph (`monty_types::unstable`) + encoding | `types.rs` (largest module) |
+| `OsFunctionCall` variants, `OsPolicy` | `types.rs`, `interactive.rs`, `lib.rs`, `sandbox.ex` |
+| `FunctionCall::object_id`, `NameLookup::object_id` (host-object routing) | `interactive.rs`, `objects.rs` |
 | `MontyException`, `ExcType`, `StackFrame` | `error.rs`, `interactive.rs` |
 | `FunctionCall::resume()`, `FunctionCall::resume_pending()`, `ResolveFutures::resume()` | `interactive.rs`, `resources.rs` |
 | `RunProgress` variants | `interactive.rs` |
 | `ExtFunctionResult` variants | `interactive.rs` |
 | `PrintWriter`, `PrintWriterCallback` | `lib.rs`, `interactive.rs`, `output.rs` |
 | `ResourceLimits`, `LimitedTracker`, `ResourceError` | `lib.rs`, `types.rs`, `resources.rs` |
-| `Serialize`/`Deserialize` on `MontyRun`, `Snapshot`, `FutureSnapshot` | `serialization.rs` |
+| `monty::dump` / `monty::Dump::load`, `Serialize` on `MontyRun` | `serialization.rs` (bump the `EXM?\x0N` headers whenever the format changes) |
 
 ### Non-breaking improvements
 - Bug fixes in monty internals (no API change)

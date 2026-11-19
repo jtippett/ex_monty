@@ -158,20 +158,31 @@ defmodule ExMonty.MountTest do
     end
 
     test "add/5 succeeds again after release", %{tmp: tmp} do
-      m = Mount.new!() |> Mount.add!("/data", tmp, :read_only)
+      # Host directories of two mounts may not overlap, so use siblings.
+      a = Path.join(tmp, "a")
+      b = Path.join(tmp, "b")
+      File.mkdir_p!(a)
+      File.mkdir_p!(b)
+
+      m = Mount.new!() |> Mount.add!("/data", a, :read_only)
       {:ok, lease} = Mount.checkout(m)
       Mount.release(lease)
-      assert {:ok, _} = Mount.add(m, "/x", tmp, :read_only)
+      assert {:ok, _} = Mount.add(m, "/x", b, :read_only)
       assert Mount.count(m) == 2
     end
   end
 
   describe "permissive count/list under lease" do
     test "count/1 works while leased", %{tmp: tmp} do
+      a = Path.join(tmp, "a")
+      b = Path.join(tmp, "b")
+      File.mkdir_p!(a)
+      File.mkdir_p!(b)
+
       m =
         Mount.new!()
-        |> Mount.add!("/a", tmp, :read_only)
-        |> Mount.add!("/b", tmp, :overlay)
+        |> Mount.add!("/a", a, :read_only)
+        |> Mount.add!("/b", b, :overlay)
 
       assert Mount.count(m) == 2
 

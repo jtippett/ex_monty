@@ -84,7 +84,7 @@ defmodule ExMonty.UpstreamFeaturesTest do
       assert {:ok, 7, ""} = ExMonty.eval(code)
     end
 
-    test "an in-sandbox dataclass instance surfaces as a repr" do
+    test "an in-sandbox dataclass instance surfaces as a Dataclass struct" do
       code = """
       from dataclasses import dataclass
 
@@ -96,10 +96,13 @@ defmodule ExMonty.UpstreamFeaturesTest do
       Point(3, 4)
       """
 
-      # Instances of classes defined *inside* the sandbox don't map to
-      # %ExMonty.Dataclass{} (that variant is for host-provided instances);
-      # they cross the boundary as their repr.
-      assert {:ok, {:repr, "Point(x=3, y=4)"}, ""} = ExMonty.eval(code)
+      # Since monty v1, instances of classes defined *inside* the sandbox
+      # cross the boundary with their attributes (they used to be a repr).
+      assert {:ok, %ExMonty.Dataclass{} = point, ""} = ExMonty.eval(code)
+      assert point.name == "Point"
+      assert point.fields == %{"x" => 3, "y" => 4}
+      assert point.field_names == ["x", "y"]
+      assert is_binary(point.id) and is_binary(point.type_id)
     end
   end
 

@@ -9,7 +9,9 @@ defmodule ExMonty.FunctionCall do
 
   When Python code calls a method on a dataclass instance, execution pauses and
   this struct is returned under the `{:method_call, call, snapshot, output}` tag.
-  For method calls, the first element of `:args` is the dataclass instance (`self`).
+  For method calls, the first element of `:args` is the dataclass instance (`self`)
+  as the host last sent it — attribute writes made inside the sandbox are not
+  reflected (see `ExMonty.Dataclass`).
 
   ## Fields
 

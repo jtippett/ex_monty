@@ -2,7 +2,7 @@
 name = "ex_monty"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.98"
 
 [lib]
 name = "ex_monty"
@@ -11,15 +11,18 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = { version = "0.37", features = ["big_integer"] }
-# Pinned to the commit v0.0.21 points at. For local development against a
+# Pinned to the commit v1.6.0 points at. For local development against a
 # monty checkout, swap the git deps for the path deps below.
-monty = { git = "https://github.com/pydantic/monty.git", rev = "70fe3f5781381eb33579e45046f8cb3845953373" }
-monty-types = { git = "https://github.com/pydantic/monty.git", rev = "70fe3f5781381eb33579e45046f8cb3845953373" }
-monty-fs = { git = "https://github.com/pydantic/monty.git", rev = "70fe3f5781381eb33579e45046f8cb3845953373" }
+monty = { git = "https://github.com/pydantic/monty.git", rev = "3f89dcbf82071896efb5e3ded507db4191e8d829" }
+monty-types = { git = "https://github.com/pydantic/monty.git", rev = "3f89dcbf82071896efb5e3ded507db4191e8d829" }
+monty-fs = { git = "https://github.com/pydantic/monty.git", rev = "3f89dcbf82071896efb5e3ded507db4191e8d829" }
 # monty = { path = "../../../monty/crates/monty" }
 # monty-types = { path = "../../../monty/crates/monty-types" }
 # monty-fs = { path = "../../../monty/crates/monty-fs" }
 num-bigint = "0.4"
-postcard = { version = "1.1", features = ["alloc"] }
+# Same codec (and locked version) upstream uses for its session dumps.
+minicbor-serde = { version = "0.7", default-features = false, features = ["alloc"] }
+# Fresh instance ids for host objects (already in the tree via monty).
+getrandom = "0.3"
 
 serde = { version = "1.0", features = ["derive"] }

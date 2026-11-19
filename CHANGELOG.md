@@ -1,5 +1,100 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Updated monty from v0.0.21 to v1.6.0** (pinned to `3f89dcbf`). Upstream
+  reworked how values cross the host boundary, how host objects are modelled,
+  and which operations are routed to the host. Requires Rust 1.98 to build
+  from source.
+
+### New Python capabilities (from upstream)
+
+- New modules: `decimal`, `random`, `time`, `functools`, `copy`, `bisect`,
+  `base64`, `binascii`, `hashlib`, `csv`, `tomllib`, `fnmatch`, `os.path`,
+  and a much larger `math`.
+- `complex` numbers and `datetime.time`.
+- `Path.glob`, `Path.rglob`, `Path.walk`, `os.walk` and `os.scandir`, served
+  by mounts and by `ExMonty.PseudoFS` (new `:scan` os call).
+- `time.time()` / `time.monotonic()`, `time.sleep()`, `asyncio.sleep()` and
+  `os.urandom()`, each delegated to the host (see below).
+
+### Added
+
+- Value mappings: `complex` ↔ `{:complex, real, imag}`, `Decimal` ↔
+  `{:decimal, string}`, `datetime.time` ↔ `{:time, map}`; self-referential
+  containers come out as `{:cycle, placeholder}`; classes and modules as
+  `{:repr, string}`. `ExMonty.Value.to_json_safe/1` handles all of them.
+- OS calls `:time`, `:sleep`, `:async_sleep`, `:urandom`, `:scan`,
+  `:create_exclusive`, `:import`, `:import_stubs` and `:get_type_hints`.
+  `:async_sleep` may be answered with `:pending` and resolved through
+  `resume_futures/2`.
+- `ExMonty.resume/2` accepts `:no_handler` for any `:os_call` (raises the
+  operation's default error, e.g. `ModuleNotFoundError` for `:import`) and
+  `{:error, type, message}` for a `:name_lookup`.
+- `ExMonty.Dataclass` gains `:id`, the instance's identity, and `:origin`
+  (`:host` or `:sandbox`). A sandbox-defined instance handed to the host and
+  returned while still alive resolves to the original object, methods and
+  identity included; once the original is gone it comes back as a plain data
+  copy. Only `:host` objects can route method calls to the host.
+- `ExMonty.Mount.add/5` returns `{:error, :overlapping_mounts}`.
+
+### Breaking
+
+- **Snapshot and runner dumps are incompatible.** Headers are now `EXMR\x03`
+  / `EXMS\x03` / `EXMF\x03`; binaries written by earlier versions are
+  rejected on load.
+- **`frozen: true` dataclasses are rejected.** Upstream no longer enforces
+  immutability on host objects, so ExMonty refuses the flag instead of
+  accepting it and silently allowing writes. Decoded dataclasses always have
+  `frozen: false`.
+- **`ExMonty.Dataclass.type_id` is a UUID string** (was an integer) on output.
+  `nil` or an integer is still accepted on input; omit it and a stable id is
+  derived from the class name.
+- **Instances of classes defined in the sandbox are returned as
+  `%ExMonty.Dataclass{}`** (previously only `@dataclass` instances were;
+  plain instances were a repr).
+- **`:method_call` receives the host's copy of `self`.** The sandbox keeps
+  its own copy of a host-provided object; the first argument of a
+  `:method_call` is the object as the host last sent it, without attribute
+  writes made in the sandbox. Pass the object to a host function, or return
+  it, to hand the modified copy over. A host function that returns an object
+  it received from the sandbox has thereby sent it — treat receiver fields as
+  untrusted unless your host functions build the objects they return. Reading an attribute the object lacks
+  raises `AttributeError`; calling the object itself raises `TypeError`.
+- **Two mounts may no longer share or nest host directories** (new
+  `:overlapping_mounts` error). Nested *virtual* paths over disjoint host
+  directories still work.
+- **The sandbox never reads the host clock or sleeps on its own.**
+  `time.time()`, `time.sleep()`, `asyncio.sleep()` and `os.urandom()` surface
+  as os calls; with no handler they raise `OSError` in `ExMonty.Sandbox` and
+  `NotImplementedError` in `eval/2` / `run/3`. `date.today()` and
+  `datetime.now()` behave as before.
+- An unresolvable `import` now reaches the host as an `:import` os call before
+  failing. `ExMonty.Sandbox` answers it with `ModuleNotFoundError` unless a
+  handler is supplied; hosts driving `start/3` / `resume/2` by hand should
+  answer `:no_handler`.
+- `type(f).__name__` for `open()` handles is now `TextIOWrapper` /
+  `BufferedReader`, as in CPython.
+
+### Security notes
+
+- A returned value is rejected if expanding its shared sub-objects would
+  produce more than 10,000,000 Elixir terms (a 60-line Python program can
+  otherwise describe a 2^60-node tree in a few kilobytes of heap), or if
+  sharing would expand it past 512 MiB (one large integer referenced a million
+  times). Both bounds apply to a call's arguments taken together, and are in
+  addition to the existing nesting-depth cap. Values without shared
+  sub-objects are unaffected.
+- Host-provided objects are tracked per run so method calls can be routed
+  back; the registry is capped at 10,000 objects / 64 MiB and evicts oldest
+  first. A method call on an evicted object raises `RuntimeError`.
+- Upstream's new `max_suspensions` limit is advisory and is **not** enforced
+  by ExMonty. `:max_duration_secs` still bounds total execution time across
+  resumes, and `ExMonty.Sandbox` bounds each callback with
+  `:callback_timeout`.
+
 ## 0.7.0 - 2026-09-01
 
 ### Added

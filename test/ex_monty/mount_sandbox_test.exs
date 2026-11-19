@@ -141,8 +141,10 @@ defmodule ExMonty.MountSandboxTest do
 
   describe "routing" do
     test "longest-prefix wins", %{tmp: tmp} do
+      # Disjoint host directories at nested *virtual* paths: the longest
+      # prefix routes. (Nested host directories are rejected since monty v1.)
       data = Path.join(tmp, "data")
-      data_users = Path.join(data, "users")
+      data_users = Path.join(tmp, "users")
       File.mkdir_p!(data)
       File.mkdir_p!(data_users)
       File.write!(Path.join(data_users, "alice.txt"), "from data/users mount")

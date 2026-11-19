@@ -207,6 +207,7 @@ Path('/output/result.txt').read_text()
 | `Path.unlink()`           | `:unlink`     | Delete file                    |
 | `Path.rmdir()`            | `:rmdir`      | Delete empty directory         |
 | `Path.iterdir()`          | `:iterdir`    | List directory contents        |
+| `Path.glob()` / `rglob()` / `walk()`, `os.walk()`, `os.scandir()` | `:scan` | One bounded subtree per call; reply with `{relative_path, is_dir, is_file, is_symlink}` tuples (root is `""`) |
 | `Path.stat()`             | `:stat`       | Get file metadata              |
 | `Path.rename(target)`     | `:rename`     | Move/rename file               |
 | `Path.resolve()`          | `:resolve`    | Get resolved path              |
@@ -215,6 +216,16 @@ Path('/output/result.txt').read_text()
 | `os.environ`              | `:get_environ`| Get all environment variables  |
 | `date.today()`            | `:date_today` | Today's date from the host clock |
 | `datetime.now(tz=...)`    | `:datetime_now` | Current datetime from the host clock; first arg is timezone or `nil` |
+| `time.time()` / `time.monotonic()` / ... | `:time` | First arg names the clock (`"time.time"`, `"time.monotonic"`); return a float |
+| `time.sleep(s)`           | `:sleep`      | First arg is seconds; the host decides whether to actually wait |
+| `await asyncio.sleep(s)`  | `:async_sleep`| As `:sleep`; may be answered with `:pending` and resolved as a future |
+| `os.urandom(n)`           | `:urandom`    | Return `{:bytes, binary}` of exactly `n` bytes |
+| `import name`             | `:import`     | Only for modules monty does not provide; unhandled means `ModuleNotFoundError` |
+
+The sandbox never reads the host clock, sleeps, or draws host entropy on its
+own: without a handler, `time.time()`, `time.sleep()`, `datetime.now()` and
+`os.urandom()` raise `OSError`. (`random` is self-contained and needs no
+handler.) `ExMonty.PseudoFS` implements the filesystem rows above.
 
 ### Custom OS Handlers
 
@@ -421,6 +432,10 @@ Control execution time, memory, and recursion depth:
 })
 ```
 
+`:max_duration_secs` counts time spent executing Python, summed across every
+resume of one `start`; time the sandbox spends suspended waiting for the host
+is not charged.
+
 > **Note on `:max_memory`:** since monty v0.0.21, cumulative heap accounting
 > lives in a custom allocator that cannot be installed inside the BEAM (it
 > terminates the process on breach). `:max_memory` still rejects individual
@@ -458,6 +473,11 @@ Runners and snapshots can be serialized to binary for storage or transfer:
 {:ok, {:complete, result, _}} = ExMonty.resume(restored_snap, {:ok, value})
 ```
 
+Dumps are tied to the ExMonty version that wrote them. The format changes
+whenever the embedded interpreter does, and a binary from another version is
+rejected on load rather than migrated — don't treat dumps as long-term storage
+across upgrades. Only load binaries your own application produced.
+
 ## Python Support
 
 Monty does **not** implement all of CPython. It targets a useful subset of the
@@ -475,8 +495,12 @@ json.loads('{"a": 1}')      # {'a': 1}  → Elixir %{"a" => 1}
 re.match(r"\d+", "42")      # match object
 ```
 
-Available modules: `math`, `json`, `re`, `os` (host-mediated), `pathlib`
-(host-mediated), `datetime` (host-mediated for `today()` / `now()`).
+Available modules: `math`, `json`, `re`, `collections`, `itertools`,
+`functools`, `dataclasses`, `typing`, `decimal`, `random`, `copy`, `bisect`,
+`base64`, `binascii`, `hashlib`, `csv`, `tomllib`, `fnmatch`, `unicodedata`,
+`asyncio`, `sys`, and the host-mediated `os` / `os.path` / `pathlib`,
+`datetime` (`today()` / `now()`) and `time`. Importing anything else raises
+`ModuleNotFoundError`.
 
 ### Syntax
 
@@ -499,14 +523,21 @@ matrix[i][j] = 0
 counts[k] += 1
 ```
 
-Class definitions are **not** supported — use `@dataclass` or pass objects in
-from Elixir as `%ExMonty.Dataclass{}`. `hasattr` and `setattr` work on those
-host-provided objects:
+Classes (plain and `@dataclass`) can be defined inside the sandbox; their
+instances reach Elixir as `%ExMonty.Dataclass{}`. Objects can also be passed in
+from Elixir as `%ExMonty.Dataclass{}`. `hasattr`, `getattr` and `setattr` work
+on those host-provided objects, and calling a method the object does not carry
+as a field pauses with `{:method_call, call, snapshot, output}`:
 
 ```python
 hasattr(user, "email")     # works on dataclasses passed from Elixir
-setattr(user, "name", "x") # works if dataclass is mutable (frozen=False)
+setattr(user, "name", "x") # changes the sandbox's copy only
+user.greet("hi")           # asks the host; args are [user, "hi"]
 ```
+
+The sandbox holds a copy of a host-provided object. Attribute writes stay in
+the sandbox until the object is returned or passed to a host function, and the
+`self` a `:method_call` receives is the object as the host last sent it.
 
 ### Built-ins
 
@@ -544,9 +575,14 @@ int("1" * 5000)
 | `Path`              | `{:path, string}`               |                                        |
 | file object (`open()`) | `{:file_handle, %{path, mode, position}}` | `mode` is a Python mode string (`"r"`, `"wb"`, ...); produced by `open()` and accepted back from an `:open` os handler |
 | `NamedTuple`        | `{:named_tuple, type_name, fields}` | `type_name` is a string; `fields` is an ordered list of `{field_name, value}` pairs |
-| `@dataclass`        | `%ExMonty.Dataclass{}`          | `fields` keys are strings              |
+| class instance / `@dataclass` | `%ExMonty.Dataclass{}` | `fields` keys are strings; `id` / `type_id` are UUID strings; `origin` is `:host` or `:sandbox` |
+| class, module       | `{:repr, string}`               | Output-only, e.g. `"<class 'Point'>"`  |
+| `complex`           | `{:complex, real, imag}`        |                                        |
+| `decimal.Decimal`   | `{:decimal, string}`            | String form keeps full precision       |
+| self-referential value | `{:cycle, placeholder}`      | Output-only; marks where a container contains itself |
 | `datetime.date`     | `{:date, %{year, month, day}}`  | Output-only today                       |
 | `datetime.datetime` | `{:datetime, %{year, month, day, hour, minute, second, microsecond, offset_seconds, tz_name}}` | `offset_seconds`/`tz_name` are `nil` for naive datetimes |
+| `datetime.time`     | `{:time, %{hour, minute, second, microsecond, offset_seconds, tz_name, fold}}` |  |
 | `datetime.timedelta`| `{:timedelta, %{days, seconds, microseconds}}` |                                |
 | `datetime.timezone` | `{:timezone, %{offset_seconds, name}}` | `name` may be `nil`                       |
 | Exception           | `%ExMonty.Exception{}`          | With type, message, traceback          |
