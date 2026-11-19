@@ -39,7 +39,8 @@ defmodule ExMonty do
           {:ok, next} = ExMonty.resume(snapshot, {:ok, response})
 
         {:method_call, call, snapshot, _output} ->
-          # Dataclass method call — call.args[0] is the instance
+          # Method call on a host-provided object — call.args[0] is the
+          # instance as the host last sent it
           result = handle_method(call.name, call.args, call.kwargs)
           {:ok, next} = ExMonty.resume(snapshot, result)
 
@@ -247,10 +248,12 @@ defmodule ExMonty do
 
     * `{:name_lookup, name, snapshot, output}` — paused at unresolved name lookup.
       Resume with `{:ok, {:function, name}}` to provide a callable, `{:ok, value}` for a
-      constant, or `:undefined` to raise `NameError`.
+      constant, `:undefined` to raise `NameError`, or `{:error, type, message}` to raise
+      a specific exception.
     * `{:function_call, %ExMonty.FunctionCall{}, snapshot, output}` — paused at external function call
-    * `{:method_call, %ExMonty.FunctionCall{}, snapshot, output}` — paused at dataclass method call
-      (first arg is the dataclass instance)
+    * `{:method_call, %ExMonty.FunctionCall{}, snapshot, output}` — paused at a method call on a
+      host-provided `ExMonty.Dataclass` (first arg is the instance as the host last sent it;
+      see `ExMonty.FunctionCall`)
     * `{:os_call, %ExMonty.OsCall{}, snapshot, output}` — paused at OS/filesystem operation
     * `{:resolve_futures, future_snapshot, output}` — paused waiting for async futures
     * `{:complete, value, output}` — execution finished
@@ -289,12 +292,19 @@ defmodule ExMonty do
   `{:error, type, message}` for errors. Bare values and malformed tuples are
   rejected without consuming the snapshot. For a `:function_call` that will be
   resolved asynchronously, pass `:pending`; execution eventually yields
-  `{:resolve_futures, future_snapshot, output}`.
+  `{:resolve_futures, future_snapshot, output}`. `:pending` is also accepted
+  for the `:os_call`s that can be awaited (`:async_sleep`).
+
+  For an `:os_call` snapshot, `:no_handler` tells the sandbox that the host
+  does not implement the operation, which raises the operation's own default
+  error: `ModuleNotFoundError` for `:import`, `PermissionError` for
+  filesystem calls, and so on.
 
   For `:name_lookup` snapshots, the result should be:
     * `{:ok, {:function, name}}` — provide a callable function object
     * `{:ok, value}` — provide any value for the name
     * `:undefined` — raise `NameError` in Python
+    * `{:error, type, message}` — raise that exception instead
 
   ## Examples
 
@@ -307,7 +317,10 @@ defmodule ExMonty do
       {:ok, next_progress} = ExMonty.resume(snapshot, {:ok, {:function, "my_func"}})
       {:ok, next_progress} = ExMonty.resume(snapshot, :undefined)
   """
-  @spec resume(snapshot(), {:ok, term()} | {:error, atom(), String.t()} | :undefined | :pending) ::
+  @spec resume(
+          snapshot(),
+          {:ok, term()} | {:error, atom(), String.t()} | :undefined | :pending | :no_handler
+        ) ::
           {:ok, progress()} | {:error, error_reason()}
   def resume(snapshot, result) do
     case Native.resume(snapshot, result) do
@@ -469,6 +482,11 @@ defmodule ExMonty do
   Serializes a snapshot to a binary for storage or transfer.
 
   Note: This consumes the snapshot — it cannot be used for resumption after dumping.
+
+  The binary is tied to the ExMonty version that wrote it: the format changes
+  whenever the embedded interpreter does, and a binary from another version is
+  rejected by `load_snapshot/1` rather than migrated. Do not use dumps as
+  long-term storage across upgrades.
   """
   @spec dump_snapshot(snapshot()) :: {:ok, binary()} | {:error, term()}
   def dump_snapshot(snapshot) do

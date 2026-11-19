@@ -47,6 +47,7 @@ defmodule ExMonty.PseudoFS do
   | `Path.unlink()`           | `:unlink`     |                                |
   | `Path.rmdir()`            | `:rmdir`      | Must be empty                  |
   | `Path.iterdir()`          | `:iterdir`    | Lists direct children          |
+  | `Path.glob()` / `rglob()` / `walk()`, `os.walk()`, `os.scandir()` | `:scan` | One bounded subtree per call |
   | `Path.stat()`             | `:stat`       | Returns stat_result tuple      |
   | `Path.rename(target)`     | `:rename`     |                                |
   | `Path.resolve()`          | `:resolve`    | Returns path as-is             |
@@ -358,6 +359,46 @@ defmodule ExMonty.PseudoFS do
 
       entries = Enum.map(file_entries ++ dir_entries, fn e -> {:path, e} end)
       {:ok, entries}
+    end
+  end
+
+  # One bounded subtree in a single reply, for `os.scandir`, `os.walk`,
+  # `Path.walk`, `Path.glob` and `Path.rglob`. The sandbox re-runs any glob
+  # pattern over the reply itself, so the pattern hint is ignored and every
+  # entry within `max_depth` is returned. Entries are
+  # `{relative_path, is_dir, is_file, is_symlink}`, the root being `""`.
+  defp dispatch(fs, :scan, [path | _], kwargs) do
+    path = extract_path(path)
+    max_depth = Map.get(kwargs, "max_depth")
+
+    cond do
+      Map.has_key?(fs.files, path) ->
+        {:ok, [{"", false, true, false}]}
+
+      not MapSet.member?(fs.dirs, path) ->
+        file_not_found(path)
+
+      true ->
+        prefix = if String.ends_with?(path, "/"), do: path, else: path <> "/"
+
+        within = fn full ->
+          case full do
+            ^path ->
+              nil
+
+            _ ->
+              if String.starts_with?(full, prefix) do
+                rel = String.replace_prefix(full, prefix, "")
+                depth = length(String.split(rel, "/"))
+                if is_nil(max_depth) or depth <= max_depth, do: rel
+              end
+          end
+        end
+
+        dirs = for d <- fs.dirs, rel = within.(d), do: {rel, true, false, false}
+        files = for {f, _} <- fs.files, rel = within.(f), do: {rel, false, true, false}
+
+        {:ok, [{"", true, false, false} | Enum.sort(dirs ++ files)]}
     end
   end
 

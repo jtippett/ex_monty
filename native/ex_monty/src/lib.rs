@@ -1,14 +1,33 @@
 mod error;
 mod interactive;
 mod mounts;
+mod objects;
 mod output;
 mod resources;
 mod serialization;
 mod types;
 
-use monty_types::{CompileOptions, PrintWriter, ResourceTracker};
+use monty_types::{
+    CompileOptions, DateTimeSource, OsPolicy, PrintWriter, ResourceTracker, SleepMode,
+};
 use resources::RunnerResource;
 use rustler::{Encoder, Env, NifResult, ResourceArc, Term};
+
+/// The OS policy every ExMonty sandbox runs under.
+///
+/// Upstream's defaults read the system clock and perform `time.sleep()` by
+/// blocking in-process. Inside a NIF that would let untrusted code observe the
+/// host's wall clock without the host being asked, and park a dirty scheduler
+/// thread for the length of the sleep. Both are routed to the host as OS calls
+/// instead (`:date_today` / `:datetime_now` / `:time`, `:sleep` /
+/// `:async_sleep`), exactly like every other OS access.
+pub(crate) fn sandbox_os_policy() -> OsPolicy {
+    OsPolicy {
+        datetime: DateTimeSource::CallHost,
+        sleep: SleepMode::CallHost,
+        ..OsPolicy::default()
+    }
+}
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn compile(
@@ -18,7 +37,8 @@ fn compile(
 ) -> NifResult<ResourceArc<RunnerResource>> {
     let input_names_for_resource = input_names.clone();
     let runner = monty::MontyRun::new(code, &script_name, input_names, CompileOptions::default())
-        .map_err(error::monty_exception_to_rustler_error)?;
+        .map_err(error::monty_exception_to_rustler_error)?
+        .with_os_policy(sandbox_os_policy());
     Ok(ResourceArc::new(RunnerResource::new(
         runner,
         input_names_for_resource,
@@ -32,14 +52,16 @@ fn run<'a>(
     inputs: Vec<(String, Term<'a>)>,
     limits: Term<'a>,
 ) -> NifResult<Term<'a>> {
-    let runner_ref = runner.runner();
-    let monty_inputs = types::decode_inputs(env, inputs, runner.input_names())?;
+    let mut monty_run = runner.clone_runner();
+    // A one-shot run cannot suspend, so there is nobody to answer a method
+    // call on a host object and the decoded host objects are not kept.
+    let (monty_inputs, _host_objects) = types::decode_inputs(env, inputs, runner.input_names())?;
     let resource_limits = types::decode_resource_limits(limits)?;
     let output_budget = output::OutputBudget::from_limits(&resource_limits);
     let tracker = ResourceTracker::new(resource_limits);
     let mut output = output_budget.collector();
 
-    let result = runner_ref
+    let result = monty_run
         .run(monty_inputs, tracker, PrintWriter::Callback(&mut output))
         .map_err(error::monty_exception_to_rustler_error)?;
 

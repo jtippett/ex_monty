@@ -19,8 +19,10 @@ defmodule ExMonty.Value do
     * sets and frozensets → sorted lists; tuples and named tuples → lists/maps
     * `{:bytes, b}` → the string itself when valid UTF-8, else Base64
     * non-finite floats → `"NaN"` / `"Infinity"` / `"-Infinity"`
-    * dates and datetimes → ISO 8601 strings; timedeltas/timezones → maps
-    * dataclasses → their field map; `{:repr, r}` and Ellipsis → repr strings
+    * dates, times and datetimes → ISO 8601 strings; timedeltas/timezones → maps
+    * `Decimal` → its digit string; `complex` → `%{"real" => r, "imag" => i}`
+    * dataclasses → their field map; `{:repr, r}`, `{:cycle, r}` and Ellipsis
+      → repr strings
     * non-string dict keys → `"null"` / `"true"` / `"1"` etc.
   """
   def to_json_safe(value) when is_number(value) or is_binary(value), do: value
@@ -37,6 +39,20 @@ defmodule ExMonty.Value do
 
   def to_json_safe({:path, path}), do: path
   def to_json_safe({:repr, repr}), do: repr
+  def to_json_safe({:cycle, placeholder}), do: placeholder
+  def to_json_safe({:decimal, digits}), do: digits
+  def to_json_safe({:function, name, _docstring}), do: "<function #{name}>"
+
+  def to_json_safe({:complex, real, imag}) do
+    %{"real" => to_json_safe(real), "imag" => to_json_safe(imag)}
+  end
+
+  def to_json_safe({:time, %{hour: h, minute: mi, second: s, microsecond: us} = time}) do
+    precision = if us == 0, do: 0, else: 6
+
+    Time.to_iso8601(Time.new!(h, mi, s, {us, precision})) <>
+      offset_suffix(Map.get(time, :offset_seconds))
+  end
 
   def to_json_safe({:date, %{year: y, month: m, day: d}}) do
     Date.new!(y, m, d) |> Date.to_iso8601()

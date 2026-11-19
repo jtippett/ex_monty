@@ -73,7 +73,7 @@ defmodule ExMonty.V0018FeaturesTest do
       type(f).__name__
       """
 
-      assert {:ok, "_io.TextIOWrapper", ""} = ExMonty.Sandbox.run(code, os: os)
+      assert {:ok, "TextIOWrapper", ""} = ExMonty.Sandbox.run(code, os: os)
     end
 
     test "binary mode round-trips through the file_handle encoding" do
@@ -88,7 +88,7 @@ defmodule ExMonty.V0018FeaturesTest do
       type(f).__name__
       """
 
-      assert {:ok, "_io.BufferedReader", ""} = ExMonty.Sandbox.run(code, os: os)
+      assert {:ok, "BufferedReader", ""} = ExMonty.Sandbox.run(code, os: os)
     end
   end
 end

@@ -30,6 +30,7 @@ mod atoms {
         host_path_not_directory,
         host_path_canonicalize_failed,
         already_mounted,
+        overlapping_mounts,
         // Mode tags
         read_only,
         read_write,
@@ -286,6 +287,10 @@ fn classify_mount_error(err: &monty_fs::MountError) -> Atom {
                 atoms::invalid_virtual_path()
             }
         }
+        // monty v1: two mounts may not share host files (same directory, or
+        // one inside the other), because the access mode is chosen by the
+        // virtual path alone and the weaker mode would win.
+        MountError::OverlappingMounts { .. } => atoms::overlapping_mounts(),
         // Other MountError variants (NoMountPoint, PathEscape, ReadOnly,
         // CrossMountRename, Io, InvalidUtf8, WriteLimitExceeded) don't
         // surface from MountTable::mount; they come from handle_os_call.
